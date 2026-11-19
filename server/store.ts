@@ -109,7 +109,10 @@ function openDatabase(directory: string): DatabaseSync {
     locale TEXT NOT NULL,
     timezone TEXT NOT NULL,
     width INTEGER NOT NULL,
-    height INTEGER NOT NULL
+    height INTEGER NOT NULL,
+    deviceScaleFactor REAL NOT NULL DEFAULT 1,
+    colorScheme TEXT NOT NULL DEFAULT 'light',
+    reducedMotion TEXT NOT NULL DEFAULT 'no-preference'
   ) STRICT;
   CREATE TABLE IF NOT EXISTS camoufox_links (
     managerPort INTEGER NOT NULL,
@@ -132,6 +135,27 @@ function openDatabase(directory: string): DatabaseSync {
   ) STRICT;
   CREATE INDEX IF NOT EXISTS due_drafts ON drafts (status, scheduledAt);
 `);
+  const preferenceColumns = [
+    ['deviceScaleFactor', 'REAL NOT NULL DEFAULT 1'],
+    ['colorScheme', "TEXT NOT NULL DEFAULT 'light'"],
+    ['reducedMotion', "TEXT NOT NULL DEFAULT 'no-preference'"],
+  ];
+  const existing = () => new Set(db.prepare('PRAGMA table_info(profiles)').all().map((column) => column.name));
+  const present = existing();
+  if (preferenceColumns.some(([name]) => !present.has(name))) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const locked = existing();
+      for (const [name, definition] of preferenceColumns) {
+        if (!locked.has(name)) db.exec(`ALTER TABLE profiles ADD COLUMN ${name} ${definition}`);
+      }
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      db.close();
+      throw error;
+    }
+  }
   return db;
 }
 

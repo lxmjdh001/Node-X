@@ -28,6 +28,9 @@ export type BrowserSettings = {
   timezone: string;
   width: number;
   height: number;
+  deviceScaleFactor: number;
+  colorScheme: 'light' | 'dark';
+  reducedMotion: 'no-preference' | 'reduce';
   proxy: ProxySettings;
 };
 
@@ -343,6 +346,9 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
           env: { HOME: directory, PATH: process.env.PATH, LANG: process.env.LANG, TMPDIR: process.env.TMPDIR },
         } : {}),
         viewport: { width: profile.width, height: profile.height },
+        deviceScaleFactor: profile.deviceScaleFactor,
+        colorScheme: profile.colorScheme,
+        reducedMotion: profile.reducedMotion,
         locale: profile.locale,
         timezoneId: profile.timezone,
         proxy: {
@@ -420,7 +426,7 @@ function viewingSession(id: string): { session: BrowserSession; page: Page } {
 
 export function browserFrame(id: string): Promise<Buffer> {
   const { session, page } = viewingSession(id);
-  session.frame ??= page.screenshot({ type: 'jpeg', quality: 55, timeout: 5000 })
+  session.frame ??= page.screenshot({ type: 'jpeg', quality: 55, scale: 'css', timeout: 5000 })
     .catch(() => { throw new InputError('暂时无法获取浏览器画面，请重试。', 503); })
     .finally(() => { session.frame = undefined; });
   return session.frame;

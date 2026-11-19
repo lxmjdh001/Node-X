@@ -80,6 +80,9 @@ type Profile = {
   timezone: string;
   width: number;
   height: number;
+  deviceScaleFactor: number;
+  colorScheme: "light" | "dark";
+  reducedMotion: "no-preference" | "reduce";
   running: boolean;
   version: string | null;
 };
@@ -153,8 +156,7 @@ type CamoufoxResult = {
   status: "ok" | "skipped" | "error";
   message: string;
 };
-type Page =
-  "overview" | "accounts" | "proxies" | "profiles" | "drafts" | "settings";
+type Page = "overview" | "proxies" | "profiles" | "drafts" | "settings";
 type EntityModal =
   | { type: "account"; item: Account }
   | { type: "proxy"; item?: Proxy }
@@ -177,9 +179,8 @@ const blank: Workspace = {
 };
 const nav: { id: Page; title: string; icon: typeof Users }[] = [
   { id: "overview", title: "工作概览", icon: LayoutDashboard },
-  { id: "accounts", title: "账号管理", icon: Users },
+  { id: "profiles", title: "窗口管理", icon: Monitor },
   { id: "proxies", title: "代理网络", icon: Network },
-  { id: "profiles", title: "浏览器环境", icon: Fingerprint },
   { id: "drafts", title: "内容工作室", icon: FileText },
 ];
 const statusText: Record<Draft["status"], string> = {
@@ -384,6 +385,13 @@ function Field({
   );
 }
 
+function workbenchPage(): Page {
+  const requested = location.hash.slice(1);
+  if (requested === "accounts") return "profiles";
+  if (requested === "settings") return "settings";
+  return nav.find((item) => item.id === requested)?.id ?? "overview";
+}
+
 function App({
   onLogout,
   accessExpiresAt,
@@ -391,12 +399,7 @@ function App({
   onLogout: () => Promise<void>;
   accessExpiresAt: string | null;
 }) {
-  const initialPage = window.location.hash.slice(1) as Page;
-  const [page, setPage] = useState<Page>(
-    [...nav.map((n) => n.id), "settings"].includes(initialPage)
-      ? initialPage
-      : "overview",
-  );
+  const [page, setPage] = useState<Page>(workbenchPage);
   const [data, setData] = useState<Workspace>(blank);
   const customer = data.workspaceScope === "customer";
   const showCamoufox =
@@ -478,11 +481,8 @@ function App({
   }, []);
   useEffect(() => {
     const handle = () => {
-      const next = window.location.hash.slice(1) as Page;
-      if ([...nav.map((n) => n.id), "settings"].includes(next)) {
-        setPage(next);
-        setQuery("");
-      }
+      setPage(workbenchPage());
+      setQuery("");
     };
     window.addEventListener("hashchange", handle);
     return () => window.removeEventListener("hashchange", handle);
@@ -592,7 +592,9 @@ function App({
       description:
         type === "accounts"
           ? "请先删除该账号关联的浏览器环境与内容，再删除账号记录。删除后无法恢复。"
-          : "删除后无法恢复。正在使用的配置可能需要先解除关联。",
+          : type === "profiles"
+            ? "删除后会清除这个窗口的浏览器会话和指纹设置。关联的账号和草稿仍可在窗口管理中查看。"
+            : "删除后无法恢复。正在使用的配置可能需要先解除关联。",
       label: "确认删除",
       destructive: true,
       action: async () => {
@@ -628,29 +630,44 @@ function App({
   const readyProxy = data.proxies.filter((p) => p.status === "ok").length;
   const connected = data.accounts.filter((a) => a.xConnected).length;
   const working = data.profiles.filter((p) => p.running).length;
-  const filteredAccounts = data.accounts.filter((a) =>
-    `${a.label} ${a.username} ${a.xUsername || ""}`
+  const windowRows = data.accounts.map((account) => {
+    const profile = data.profiles.find((item) => item.accountId === account.id);
+    const proxy = data.proxies.find((item) => item.id === profile?.proxyId);
+    return { account, profile, proxy };
+  });
+  const visibleWindows = windowRows.filter(({ account, profile, proxy }) =>
+    [
+      account.label,
+      account.username,
+      account.xUsername,
+      profile?.label,
+      proxy?.label,
+      proxy?.host,
+    ]
+      .join(" ")
       .toLowerCase()
-      .includes(query.toLowerCase()),
+      .includes(query.trim().toLowerCase()),
   );
   const pageInfo = {
     overview: ["工作概览", "每个账号，都有清晰的工作环境。"],
-    accounts: ["账号管理", "在独立窗口登录并管理你的 X 账号。"],
     proxies: ["代理网络", "配置 SOCKS5 出口，并检查连接状态。"],
-    profiles: ["浏览器环境", "为每个账号绑定独立的浏览器数据与代理。"],
+    profiles: ["窗口管理", "在同一个窗口管理 X 账号、SOCKS5 代理和显示设置。"],
     drafts: ["内容工作室", "从想法到草稿，再由你确认发布。"],
     settings: ["系统设置", "查看本地服务、AI 模型与 X 接入状态。"],
   }[page];
-  function AccountTable({ preview = false }: { preview?: boolean }) {
-    const list = preview ? data.accounts.slice(0, 5) : filteredAccounts;
+  function WindowTable({ preview = false }: { preview?: boolean }) {
+    const list = preview
+      ? windowRows.filter(({ profile }) => profile).slice(0, 5)
+      : visibleWindows;
     if (!list.length)
       return (
         <Empty
-          title={query ? "没有找到这个账号" : "新建第一个 X 窗口"}
+          icon={Monitor}
+          title={query ? "没有找到匹配的窗口" : "新建第一个 X 窗口"}
           description={
             query
-              ? "试试账号名称或用户名。"
-              : "设置代理和指纹后，在窗口里直接登录 X。"
+              ? "试试窗口名称、X 用户名或代理地址。"
+              : "设置代理和指纹后，在独立窗口里登录 X。"
           }
           action={!query && newWindowButton}
         />
@@ -660,132 +677,195 @@ function App({
         <table>
           <thead>
             <tr>
-              <th>账号</th>
-              {data.settings.xConfigured && <th>X 授权</th>}
-              <th>浏览器环境</th>
-              <th>代理出口</th>
+              <th>窗口 / 账号</th>
+              <th>SOCKS5 代理</th>
+              {!preview && <th>窗口指纹</th>}
+              <th>状态</th>
               <th className="align-right">操作</th>
             </tr>
           </thead>
           <tbody>
-            {list.map((account) => {
-              const profile = data.profiles.find(
-                (p) => p.accountId === account.id,
-              );
-              const proxy = data.proxies.find((p) => p.id === profile?.proxyId);
+            {list.map(({ account, profile, proxy }) => {
+              const handle = account.xUsername || account.username;
               return (
                 <tr key={account.id}>
                   <td>
-                    <div className="account-cell">
-                      <span className="avatar">
-                        {account.label.slice(0, 1).toUpperCase()}
-                      </span>
-                      <div>
-                        <strong>{account.label}</strong>
-                        {account.username && (
-                          <small>@{account.username.replace(/^@/, "")}</small>
-                        )}
-                      </div>
+                    <div className="cell-stack">
+                      <strong>{profile?.label || account.label}</strong>
+                      {handle && <small>@{handle.replace(/^@/, "")}</small>}
+                      {profile && profile.label !== account.label && (
+                        <small>{account.label}</small>
+                      )}
                     </div>
-                  </td>
-                  {data.settings.xConfigured && (
-                    <td>
-                      <Badge tone={account.xConnected ? "green" : "neutral"}>
-                        {account.xConnected
-                          ? `已连接${account.xUsername ? ` @${account.xUsername.replace(/^@/, "")}` : ""}`
-                          : "未授权"}
-                      </Badge>
-                    </td>
-                  )}
-                  <td>
-                    {profile ? (
-                      <div className="cell-stack">
-                        <span>{profile.label}</span>
-                        <small>{profile.running ? "正在运行" : "已配置"}</small>
-                      </div>
-                    ) : (
-                      <button
-                        className="text-button muted"
-                        onClick={() => {
-                          setWindowCreator({ account });
-                        }}
-                      >
-                        新建窗口
-                        <Icon icon={ArrowUpRight} size={13} />
-                      </button>
-                    )}
                   </td>
                   <td>
                     {proxy ? (
-                      <span className="mono subtle">
-                        {proxy.host}:{proxy.port}
-                      </span>
+                      <div className="cell-stack">
+                        <span>{proxy.label}</span>
+                        <small className="mono">
+                          {proxy.host}:{proxy.port}
+                        </small>
+                      </div>
                     ) : (
-                      <span className="subtle">—</span>
+                      "—"
+                    )}
+                  </td>
+                  {!preview && (
+                    <td>
+                      {profile ? (
+                        <div className="cell-stack">
+                          <span>
+                            {profile.locale} · {profile.timezone}
+                          </span>
+                          <small>
+                            {profile.width} × {profile.height} ·{" "}
+                            {profile.deviceScaleFactor}× ·{" "}
+                            {profile.colorScheme === "dark" ? "深色" : "浅色"}
+                          </small>
+                          <small>
+                            {profile.reducedMotion === "reduce"
+                              ? "减少动效"
+                              : "标准动效"}
+                            {(profile.version || data.chromium?.version) &&
+                              ` · Chromium ${profile.version || data.chromium?.version}`}
+                          </small>
+                        </div>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                  )}
+                  <td>
+                    <Badge tone={profile?.running ? "green" : "neutral"}>
+                      {profile
+                        ? profile.running
+                          ? "运行中"
+                          : "已关闭"
+                        : "待建窗口"}
+                    </Badge>
+                    {!preview && data.settings.xConfigured && (
+                      <small className="window-auth-status">
+                        {account.xConnected ? "已授权发布" : "未授权发布"}
+                      </small>
                     )}
                   </td>
                   <td>
                     <div className="row-actions">
-                      {!data.settings.xConfigured ? (
+                      {profile ? (
                         <Button
-                          variant="ghost"
-                          icon={Monitor}
-                          disabled={!profile}
-                          busy={busy === profile?.id}
-                          onClick={() => profile && void openBrowser(profile)}
+                          icon={
+                            profile.running && !data.remoteBrowser
+                              ? Square
+                              : Play
+                          }
+                          variant={profile.running ? "secondary" : "primary"}
+                          busy={busy === profile.id}
+                          onClick={() =>
+                            profile.running && !data.remoteBrowser
+                              ? run(
+                                  profile.id,
+                                  `/api/profiles/${profile.id}/stop`,
+                                  "窗口已关闭",
+                                )
+                              : void openBrowser(profile)
+                          }
                         >
-                          打开 X
-                        </Button>
-                      ) : !account.xConnected ? (
-                        <Button
-                          variant="ghost"
-                          icon={Link2}
-                          onClick={() => {
-                            location.href = `/api/x/connect/${account.id}`;
-                          }}
-                        >
-                          授权
+                          {profile.running
+                            ? data.remoteBrowser
+                              ? "进入窗口"
+                              : "关闭窗口"
+                            : "打开 X"}
                         </Button>
                       ) : (
-                        !preview && (
-                          <IconButton
-                            icon={Unplug}
-                            label="断开 X 授权"
-                            onClick={() =>
-                              setConfirmation({
-                                title: "断开 X 授权？",
-                                description:
-                                  "该账号将无法发布内容，重新授权后可继续使用。",
-                                label: "断开授权",
-                                action: async () => {
-                                  await mutate(
-                                    account.id,
-                                    `/api/accounts/${account.id}/disconnect`,
-                                    "POST",
-                                    undefined,
-                                    "已断开 X 授权",
-                                  );
-                                  setConfirmation(null);
-                                },
-                              })
-                            }
-                          />
-                        )
+                        <Button
+                          variant="secondary"
+                          icon={Plus}
+                          onClick={() => setWindowCreator({ account })}
+                        >
+                          新建窗口
+                        </Button>
                       )}
                       {!preview && (
                         <>
+                          {profile?.running && data.remoteBrowser && (
+                            <IconButton
+                              icon={Square}
+                              label={`关闭窗口 ${profile.label}`}
+                              disabled={busy === profile.id}
+                              onClick={() =>
+                                run(
+                                  profile.id,
+                                  `/api/profiles/${profile.id}/stop`,
+                                  "窗口已关闭",
+                                )
+                              }
+                            />
+                          )}
+                          {profile && (
+                            <IconButton
+                              icon={Fingerprint}
+                              label={`配置窗口 ${profile.label}`}
+                              disabled={profile.running || busy === profile.id}
+                              onClick={() =>
+                                setModal({ type: "profile", item: profile })
+                              }
+                            />
+                          )}
                           <IconButton
                             icon={Pencil}
-                            label={`编辑 ${account.label}`}
+                            label={`编辑账号 ${account.label}`}
                             onClick={() =>
                               setModal({ type: "account", item: account })
                             }
                           />
+                          {data.settings.xConfigured &&
+                            (account.xConnected ? (
+                              <IconButton
+                                icon={Unplug}
+                                label="断开 X 授权"
+                                onClick={() =>
+                                  setConfirmation({
+                                    title: "断开 X 授权？",
+                                    description:
+                                      "该账号将无法发布内容，重新授权后可继续使用。",
+                                    label: "断开授权",
+                                    action: async () => {
+                                      await mutate(
+                                        account.id,
+                                        `/api/accounts/${account.id}/disconnect`,
+                                        "POST",
+                                        undefined,
+                                        "已断开 X 授权",
+                                      );
+                                      setConfirmation(null);
+                                    },
+                                  })
+                                }
+                              />
+                            ) : (
+                              <IconButton
+                                icon={Link2}
+                                label="授权发布"
+                                onClick={() => {
+                                  location.href = `/api/x/connect/${account.id}`;
+                                }}
+                              />
+                            ))}
                           <IconButton
                             icon={Trash2}
-                            label={`删除 ${account.label}`}
+                            label={
+                              profile
+                                ? `删除窗口 ${profile.label}`
+                                : `删除账号 ${account.label}`
+                            }
+                            disabled={
+                              profile?.running ||
+                              (profile && busy === profile.id)
+                            }
                             onClick={() =>
-                              remove("accounts", account.id, account.label)
+                              profile
+                                ? remove("profiles", profile.id, profile.label)
+                                : remove("accounts", account.id, account.label)
                             }
                           />
                         </>
@@ -844,8 +924,8 @@ function App({
             >
               <Icon icon={item.icon} />
               <span>{item.title}</span>
-              {item.id === "accounts" && data.accounts.length > 0 && (
-                <span className="nav-count">{data.accounts.length}</span>
+              {item.id === "profiles" && data.profiles.length > 0 && (
+                <span className="nav-count">{data.profiles.length}</span>
               )}
               {page === item.id && <span className="nav-active-dot" />}
             </button>
@@ -946,12 +1026,12 @@ function App({
                   Camoufox 批量管理
                 </Button>
               )}
-              {(page === "accounts" || page === "profiles") && (
+              {page === "profiles" && (
                 <Button icon={Upload} onClick={() => setImporting(true)}>
                   批量导入
                 </Button>
               )}
-              {page === "overview" || page === "accounts" || page === "profiles"
+              {page === "overview" || page === "profiles"
                 ? newWindowButton
                 : page === "proxies"
                   ? addButton("proxy", "添加代理")
@@ -996,7 +1076,7 @@ function App({
                         detail: `共 ${data.proxies.length} 个 SOCKS5 代理`,
                       },
                       {
-                        name: "浏览器环境",
+                        name: "浏览器窗口",
                         value: data.profiles.length,
                         icon: Fingerprint,
                         detail: `${working} 个正在运行`,
@@ -1041,38 +1121,24 @@ function App({
                         让每次操作都有清晰的归属。
                       </p>
                       <span className="setup-progress">
-                        {
-                          [
-                            data.accounts.length,
-                            data.proxies.length,
-                            data.profiles.length,
-                          ].filter(Boolean).length
-                        }{" "}
-                        / 3 项基础配置完成
+                        {data.profiles.length} 个窗口已创建
                       </span>
                     </div>
                     <div className="setup-steps">
                       {[
                         {
-                          label: "添加 X 账号",
-                          text: "记录账号信息，连接发文授权",
-                          done: data.accounts.length > 0,
-                          icon: Users,
-                          target: "accounts" as Page,
+                          label: "管理窗口",
+                          text: "在窗口里登录 X，代理和显示设置随窗口保存",
+                          done: data.profiles.length > 0,
+                          icon: Monitor,
+                          target: "profiles" as Page,
                         },
                         {
-                          label: "配置 SOCKS5 代理",
-                          text: "添加独立出口，检查网络连通性",
+                          label: "管理 SOCKS5 代理",
+                          text: "维护代理配置并检查网络连通性",
                           done: data.proxies.length > 0,
                           icon: Network,
                           target: "proxies" as Page,
-                        },
-                        {
-                          label: "创建浏览器环境",
-                          text: "绑定账号、代理与独立浏览器数据",
-                          done: data.profiles.length > 0,
-                          icon: Fingerprint,
-                          target: "profiles" as Page,
                         },
                       ].map((step, i) => (
                         <button
@@ -1105,18 +1171,18 @@ function App({
                     <section className="panel account-overview">
                       <div className="panel-heading">
                         <h2>
-                          账号与环境
-                          <span className="count">{data.accounts.length}</span>
+                          最近窗口
+                          <span className="count">{data.profiles.length}</span>
                         </h2>
                         <button
                           className="text-button"
-                          onClick={() => go("accounts")}
+                          onClick={() => go("profiles")}
                         >
                           查看全部
                           <Icon icon={ArrowRight} size={15} />
                         </button>
                       </div>
-                      <AccountTable preview />
+                      <WindowTable preview />
                     </section>
                     <section className="panel checklist">
                       <div className="panel-heading">
@@ -1169,48 +1235,14 @@ function App({
                       <div className="helper-note">
                         <Icon icon={CircleHelp} size={16} />
                         <p>
-                          浏览器用于人工登录与管理。内容发布通过 X
-                          授权接口执行。
+                          {data.settings.xConfigured
+                            ? "浏览器用于登录和管理。定时发布使用已开通的 X 接口。"
+                            : "在窗口里登录 X，确认账号和正文后可在网页发布。"}
                         </p>
                       </div>
                     </section>
                   </div>
                 </>
-              )}
-              {page === "accounts" && (
-                <section className="panel">
-                  <div className="table-toolbar">
-                    <div className="tabs">
-                      <span className="tab active">
-                        全部账号<span>{data.accounts.length}</span>
-                      </span>
-                    </div>
-                    <SearchBox
-                      value={query}
-                      onChange={setQuery}
-                      placeholder="搜索账号名称、用户名"
-                    />
-                  </div>
-                  {!data.settings.xConfigured && data.accounts.length > 0 && (
-                    <div className="inline-notice">
-                      <Icon icon={Link2} size={16} />
-                      <span>
-                        绑定浏览器环境后，点击「打开 X」在网页内登录。
-                      </span>
-                      <button
-                        className="text-button"
-                        onClick={() => go("profiles")}
-                      >
-                        浏览器环境
-                      </button>
-                    </div>
-                  )}
-                  <AccountTable />
-                  <div className="table-footer">
-                    共 {filteredAccounts.length} 个账号
-                    <span>登录信息保存在各自的浏览器环境中</span>
-                  </div>
-                </section>
               )}
               {page === "proxies" && (
                 <>
@@ -1476,161 +1508,19 @@ function App({
                     <div className="table-toolbar">
                       <div className="tabs">
                         <span className="tab active">
-                          Chromium 窗口<span>{data.profiles.length}</span>
+                          窗口与账号<span>{data.accounts.length}</span>
                         </span>
                       </div>
                       <SearchBox
                         value={query}
                         onChange={setQuery}
-                        placeholder="搜索环境或账号"
+                        placeholder="搜索窗口、账号或代理"
                       />
                     </div>
-                    {!data.profiles.length ? (
-                      <Empty
-                        icon={Fingerprint}
-                        title="打开你的第一个独立窗口"
-                        description="设置 SOCKS5 和浏览器指纹后，窗口会直接打开 X 登录页。"
-                        action={newWindowButton}
-                      />
-                    ) : (
-                      <div className="table-scroll">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>环境名称</th>
-                              <th>关联账号</th>
-                              <th>代理网络</th>
-                              <th>配置</th>
-                              <th>运行状态</th>
-                              <th className="align-right">操作</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {data.profiles
-                              .filter((p) =>
-                                `${p.label} ${accountName(p.accountId)}`
-                                  .toLowerCase()
-                                  .includes(query.toLowerCase()),
-                              )
-                              .map((profile) => (
-                                <tr key={profile.id}>
-                                  <td>
-                                    <div className="cell-stack">
-                                      <strong>{profile.label}</strong>
-                                      <small>
-                                        {profile.version ||
-                                          "启动后读取浏览器版本"}
-                                      </small>
-                                    </div>
-                                  </td>
-                                  <td>{accountName(profile.accountId)}</td>
-                                  <td>
-                                    <div className="cell-stack">
-                                      <span>
-                                        {data.proxies.find(
-                                          (p) => p.id === profile.proxyId,
-                                        )?.label || "代理已移除"}
-                                      </span>
-                                      <small>SOCKS5</small>
-                                    </div>
-                                  </td>
-                                  <td>
-                                    <div className="cell-stack">
-                                      <span>
-                                        {profile.locale} / {profile.width} ×{" "}
-                                        {profile.height}
-                                      </span>
-                                      <small>{profile.timezone}</small>
-                                    </div>
-                                  </td>
-                                  <td>
-                                    <Badge
-                                      tone={
-                                        profile.running ? "green" : "neutral"
-                                      }
-                                    >
-                                      {profile.running ? "运行中" : "未启动"}
-                                    </Badge>
-                                  </td>
-                                  <td>
-                                    <div className="row-actions">
-                                      <Button
-                                        icon={
-                                          profile.running && !data.remoteBrowser
-                                            ? Square
-                                            : Play
-                                        }
-                                        variant={
-                                          profile.running
-                                            ? "secondary"
-                                            : "primary"
-                                        }
-                                        busy={busy === profile.id}
-                                        onClick={() =>
-                                          profile.running && !data.remoteBrowser
-                                            ? run(
-                                                profile.id,
-                                                `/api/profiles/${profile.id}/stop`,
-                                                "环境已关闭",
-                                              )
-                                            : void openBrowser(profile)
-                                        }
-                                      >
-                                        {profile.running
-                                          ? data.remoteBrowser
-                                            ? "进入浏览器"
-                                            : "关闭"
-                                          : "打开"}
-                                      </Button>
-                                      {profile.running &&
-                                        data.remoteBrowser && (
-                                          <IconButton
-                                            icon={Square}
-                                            label={`关闭 ${profile.label}`}
-                                            disabled={busy === profile.id}
-                                            onClick={() =>
-                                              run(
-                                                profile.id,
-                                                `/api/profiles/${profile.id}/stop`,
-                                                "环境已关闭",
-                                              )
-                                            }
-                                          />
-                                        )}
-                                      <IconButton
-                                        icon={Pencil}
-                                        label={`编辑 ${profile.label}`}
-                                        disabled={profile.running}
-                                        onClick={() =>
-                                          setModal({
-                                            type: "profile",
-                                            item: profile,
-                                          })
-                                        }
-                                      />
-                                      <IconButton
-                                        icon={Trash2}
-                                        label={`删除 ${profile.label}`}
-                                        disabled={profile.running}
-                                        onClick={() =>
-                                          remove(
-                                            "profiles",
-                                            profile.id,
-                                            profile.label,
-                                          )
-                                        }
-                                      />
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                    <WindowTable />
                     <div className="table-footer">
-                      共 {data.profiles.length} 个环境
-                      <span>{working} 个环境运行中</span>
+                      共 {visibleWindows.length} 项
+                      <span>{working} 个窗口运行中</span>
                     </div>
                   </section>
                 </>
@@ -1932,7 +1822,7 @@ function App({
                     <div className="settings-content">
                       <p>
                         {data.settings.xConfigured
-                          ? "前往账号管理，连接需要发文的 X 账号。"
+                          ? "前往窗口管理，连接需要发文的 X 账号。"
                           : "在 X 网页完成登录。下次打开同一个环境时可继续使用已保存的会话。"}
                       </p>
                       {!customer && data.settings.xConfigured && (
@@ -1942,12 +1832,12 @@ function App({
                           />
                           <p className="settings-hint">
                             回调地址需要与 X
-                            开发者平台的设置完全一致。配置完成后，前往账号管理连接各个账号。
+                            开发者平台的设置完全一致。配置完成后，前往窗口管理连接各个账号。
                           </p>
                         </>
                       )}
-                      <Button icon={Users} onClick={() => go("accounts")}>
-                        前往账号管理
+                      <Button icon={Users} onClick={() => go("profiles")}>
+                        前往窗口管理
                       </Button>
                     </div>
                   </section>
@@ -3354,6 +3244,134 @@ function ImportDialog({
   );
 }
 
+function readWindowFingerprint(form: FormData) {
+  return {
+    locale: String(form.get("locale")).trim(),
+    timezone: String(form.get("timezone")).trim(),
+    width: Number(form.get("width")),
+    height: Number(form.get("height")),
+    deviceScaleFactor: Number(form.get("deviceScaleFactor")),
+    colorScheme: String(form.get("colorScheme")),
+    reducedMotion: String(form.get("reducedMotion")),
+  };
+}
+
+function WindowFingerprintFields({
+  profile,
+  version,
+  disabled,
+}: {
+  profile?: Profile;
+  version?: string | null;
+  disabled: boolean;
+}) {
+  return (
+    <>
+      <h3 className="form-divider">
+        浏览器指纹{version && <span>Chromium {version}</span>}
+      </h3>
+      <div className="form-grid">
+        <Field label="浏览器语言">
+          <input
+            name="locale"
+            defaultValue={profile?.locale || "zh-CN"}
+            list="window-languages"
+            maxLength={30}
+            required
+            disabled={disabled}
+          />
+          <datalist id="window-languages">
+            {["zh-CN", "zh-TW", "en-US", "en-GB", "ja-JP"].map((value) => (
+              <option value={value} key={value} />
+            ))}
+          </datalist>
+        </Field>
+        <Field label="时区">
+          <input
+            name="timezone"
+            defaultValue={profile?.timezone || "Asia/Shanghai"}
+            list="window-timezones"
+            maxLength={80}
+            required
+            disabled={disabled}
+          />
+          <datalist id="window-timezones">
+            {[
+              "Asia/Shanghai",
+              "Asia/Hong_Kong",
+              "Asia/Tokyo",
+              "Asia/Singapore",
+              "America/New_York",
+              "America/Los_Angeles",
+              "Europe/London",
+              "UTC",
+            ].map((value) => (
+              <option value={value} key={value} />
+            ))}
+          </datalist>
+        </Field>
+        <Field label="窗口宽度">
+          <input
+            name="width"
+            type="number"
+            min={320}
+            max={3840}
+            defaultValue={profile?.width ?? 1440}
+            required
+            disabled={disabled}
+          />
+        </Field>
+        <Field label="窗口高度">
+          <input
+            name="height"
+            type="number"
+            min={320}
+            max={2160}
+            defaultValue={profile?.height ?? 900}
+            required
+            disabled={disabled}
+          />
+        </Field>
+        <Field label="显示比例" hint="网页的设备像素比，范围 1–3 倍。">
+          <input
+            name="deviceScaleFactor"
+            type="number"
+            min={1}
+            max={3}
+            step="any"
+            defaultValue={profile?.deviceScaleFactor ?? 1}
+            required
+            disabled={disabled}
+          />
+        </Field>
+        <Field label="网页颜色主题">
+          <select
+            name="colorScheme"
+            aria-label="网页颜色主题"
+            defaultValue={profile?.colorScheme ?? "light"}
+            disabled={disabled}
+          >
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </Field>
+        <Field label="网页动态效果">
+          <select
+            name="reducedMotion"
+            aria-label="网页动态效果"
+            defaultValue={profile?.reducedMotion ?? "no-preference"}
+            disabled={disabled}
+          >
+            <option value="no-preference">标准动效</option>
+            <option value="reduce">减少动效</option>
+          </select>
+        </Field>
+      </div>
+      {profile && <p className="form-note">设置随窗口保存，下次打开时生效。</p>}
+    </>
+  );
+}
+
 function CreateWindowDialog({
   account,
   proxies,
@@ -3394,10 +3412,7 @@ function CreateWindowDialog({
               username: read("username"),
               password: read("password"),
             },
-        locale: read("locale"),
-        timezone: read("timezone"),
-        width: Number(read("width")),
-        height: Number(read("height")),
+        ...readWindowFingerprint(form),
       })) as { profile: Profile };
       await onCreated(profile);
     } catch (error) {
@@ -3486,52 +3501,10 @@ function CreateWindowDialog({
               </div>
             </>
           )}
-          <h3 className="form-divider">
-            浏览器指纹
-            {chromiumVersion && <span>Chromium {chromiumVersion}</span>}
-          </h3>
-          <div className="form-grid">
-            <Field label="浏览器语言">
-              <input
-                name="locale"
-                maxLength={30}
-                defaultValue="zh-CN"
-                required
-                disabled={pending}
-              />
-            </Field>
-            <Field label="时区">
-              <input
-                name="timezone"
-                maxLength={80}
-                defaultValue="Asia/Shanghai"
-                required
-                disabled={pending}
-              />
-            </Field>
-            <Field label="窗口宽度">
-              <input
-                name="width"
-                type="number"
-                min={320}
-                max={3840}
-                defaultValue={1440}
-                required
-                disabled={pending}
-              />
-            </Field>
-            <Field label="窗口高度">
-              <input
-                name="height"
-                type="number"
-                min={320}
-                max={2160}
-                defaultValue={900}
-                required
-                disabled={pending}
-              />
-            </Field>
-          </div>
+          <WindowFingerprintFields
+            version={chromiumVersion}
+            disabled={pending}
+          />
           {error && (
             <p className="form-error" role="alert">
               {error}
@@ -3583,10 +3556,6 @@ function EntityForm({
                   (a) => !data.profiles.some((p) => p.accountId === a.id),
                 )?.id || "",
               proxyId: data.proxies[0]?.id || "",
-              locale: "zh-CN",
-              timezone: "Asia/Shanghai",
-              width: 1440,
-              height: 900,
               ...item,
             }
           : {
@@ -3605,7 +3574,7 @@ function EntityForm({
   const titles = {
     account: "账号",
     proxy: "代理",
-    profile: "浏览器环境",
+    profile: "窗口",
     draft: "内容",
   };
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -3638,10 +3607,7 @@ function EntityForm({
           label: values.label.trim(),
           accountId: values.accountId,
           proxyId: values.proxyId,
-          locale: values.locale.trim(),
-          timezone: values.timezone.trim(),
-          width: Number(values.width),
-          height: Number(values.height),
+          ...readWindowFingerprint(new FormData(event.currentTarget)),
         };
       else {
         body = edit
@@ -3712,8 +3678,9 @@ function EntityForm({
               <div className="form-note">
                 <Icon icon={ShieldCheck} size={17} />
                 <p>
-                  此处记录账号信息。登录请在独立浏览器环境中完成，发布权限通过 X
-                  授权连接。
+                  {data.settings.xConfigured
+                    ? "在对应窗口登录 X，接口发布需要账号授权。"
+                    : "在对应窗口登录 X，账号名称和备注可在这里修改。"}
                 </p>
               </div>
             </>
@@ -3853,74 +3820,11 @@ function EntityForm({
                   ))}
                 </select>
               </Field>
-              <div className="form-grid">
-                <Field label="语言">
-                  <input
-                    required
-                    list="profile-locale-options"
-                    value={values.locale}
-                    onChange={(e) => update("locale", e.target.value)}
-                  />
-                </Field>
-                <datalist id="profile-locale-options">
-                  <option value="zh-CN">简体中文</option>
-                  <option value="en-US">英语（美国）</option>
-                  <option value="en-GB">英语（英国）</option>
-                  <option value="zh-TW">繁体中文</option>
-                  <option value="ja-JP">日语</option>
-                </datalist>
-                <Field label="时区">
-                  <input
-                    required
-                    list="profile-timezone-options"
-                    value={values.timezone}
-                    onChange={(e) => update("timezone", e.target.value)}
-                  />
-                </Field>
-                <datalist id="profile-timezone-options">
-                  {[
-                    "Asia/Shanghai",
-                    "Asia/Hong_Kong",
-                    "Asia/Tokyo",
-                    "Asia/Singapore",
-                    "America/New_York",
-                    "America/Los_Angeles",
-                    "Europe/London",
-                    "UTC",
-                  ].map((t) => (
-                    <option key={t}>{t}</option>
-                  ))}
-                </datalist>
-              </div>
-              <div className="form-grid">
-                <Field label="窗口宽度">
-                  <input
-                    required
-                    type="number"
-                    min="320"
-                    max="3840"
-                    value={values.width}
-                    onChange={(e) => update("width", e.target.value)}
-                  />
-                </Field>
-                <Field label="窗口高度">
-                  <input
-                    required
-                    type="number"
-                    min="320"
-                    max="2160"
-                    value={values.height}
-                    onChange={(e) => update("height", e.target.value)}
-                  />
-                </Field>
-              </div>
-              <div className="form-note">
-                <Icon icon={Monitor} size={17} />
-                <p>
-                  使用 Playwright 安装的 Chromium
-                  及其真实浏览器信息。语言、时区和窗口设置会在下次启动时生效。
-                </p>
-              </div>
+              <WindowFingerprintFields
+                profile={modal.item}
+                version={data.chromium?.version}
+                disabled={!!pending}
+              />
             </>
           )}
           {modal.type === "draft" && (

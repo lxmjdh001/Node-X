@@ -38,6 +38,7 @@ type Proxy = {
 type Profile = {
   id: string; accountId: string; proxyId: string; label: string;
   locale: string; timezone: string; width: number; height: number;
+  deviceScaleFactor: number; colorScheme: 'light' | 'dark'; reducedMotion: 'no-preference' | 'reduce';
 };
 
 export const accountById = (id: string) => requireFound(row<Account>('SELECT * FROM accounts WHERE id = ?', id), '找不到这个账号。');
@@ -75,6 +76,9 @@ export const profileInput = z.object({
   }, '请输入有效的时区，如 Asia/Shanghai。'),
   width: z.number().int().min(320).max(3840),
   height: z.number().int().min(320).max(2160),
+  deviceScaleFactor: z.number().min(1).max(3).default(1),
+  colorScheme: z.enum(['light', 'dark']).default('light'),
+  reducedMotion: z.enum(['no-preference', 'reduce']).default('no-preference'),
 });
 const windowInput = profileInput.omit({ label: true, accountId: true, proxyId: true }).extend({
   id: z.uuid(),
@@ -106,8 +110,9 @@ export function createProxy(data: z.output<typeof proxyInput>): string {
 }
 
 export function createProfile(data: z.output<typeof profileInput>, id: string = randomUUID()): void {
-  write('INSERT INTO profiles (id, accountId, proxyId, label, locale, timezone, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    id, data.accountId, data.proxyId, data.label, data.locale, data.timezone, data.width, data.height);
+  write(`INSERT INTO profiles (id, accountId, proxyId, label, locale, timezone, width, height, deviceScaleFactor, colorScheme, reducedMotion)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, data.accountId, data.proxyId, data.label, data.locale, data.timezone,
+    data.width, data.height, data.deviceScaleFactor, data.colorScheme, data.reducedMotion);
 }
 
 function profileStatus(profile: Profile) {
@@ -275,11 +280,16 @@ workspace.post('/profiles', (req, res) => {
 workspace.patch('/profiles/:id', (req, res) => {
   const profile = profileById(req.params.id);
   ensureProfileFree(profile.id);
-  const data = profileInput.parse(req.body);
+  const data = profileInput.parse({
+    deviceScaleFactor: profile.deviceScaleFactor, colorScheme: profile.colorScheme, reducedMotion: profile.reducedMotion,
+    ...req.body,
+  });
   if (data.accountId !== profile.accountId) throw new InputError('已建立的浏览器环境不能转给另一个账号。', 409);
   proxyById(data.proxyId);
-  write('UPDATE profiles SET proxyId = ?, label = ?, locale = ?, timezone = ?, width = ?, height = ? WHERE id = ?',
-    data.proxyId, data.label, data.locale, data.timezone, data.width, data.height, profile.id);
+  write(`UPDATE profiles SET proxyId = ?, label = ?, locale = ?, timezone = ?, width = ?, height = ?,
+    deviceScaleFactor = ?, colorScheme = ?, reducedMotion = ? WHERE id = ?`,
+    data.proxyId, data.label, data.locale, data.timezone, data.width, data.height,
+    data.deviceScaleFactor, data.colorScheme, data.reducedMotion, profile.id);
   res.json(ok);
 });
 

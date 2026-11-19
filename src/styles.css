@@ -3685,3 +3685,7 @@ td strong {
 .remote-browser-draft .button {
   min-height: 44px;
 }
+.window-auth-status {
+  display: block;
+  margin-top: 6px;
+}
