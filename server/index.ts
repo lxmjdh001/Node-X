@@ -21,12 +21,12 @@ function readPort(value: string | number, name: string) {
   return port;
 }
 
-function publicOrigin() {
-  const value = process.env.NODEX_PUBLIC_ORIGIN?.trim();
+function publicOrigin(name: string) {
+  const value = process.env[name]?.trim();
   if (!value) return null;
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('NODEX_PUBLIC_ORIGIN 必须是完整的 HTTPS 来源，不含路径、查询参数或凭据。');
+    throw new Error(`${name} 必须是完整的 HTTPS 来源，不含路径、查询参数或凭据。`);
   }
   return url;
 }
@@ -34,7 +34,8 @@ function publicOrigin() {
 const port = readPort(process.env.PORT || 4173, 'PORT');
 const operatorPort = readPort(process.env.NODEX_OPERATOR_PORT || port + 1, 'NODEX_OPERATOR_PORT');
 if (port === operatorPort) throw new Error('工作台和生成页必须使用不同端口。');
-const external = publicOrigin();
+const external = publicOrigin('NODEX_PUBLIC_ORIGIN');
+const operatorExternal = publicOrigin('NODEX_OPERATOR_PUBLIC_ORIGIN');
 if (external) process.env.NODEX_PUBLIC_HTTPS = '1';
 const localHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 const operatorAccessPort = readPort(process.env.NODEX_OPERATOR_ACCESS_PORT || operatorPort, 'NODEX_OPERATOR_ACCESS_PORT');
@@ -48,6 +49,7 @@ app.disable('x-powered-by');
 operatorApp.disable('x-powered-by');
 // Only the same-host reverse proxy may supply the effective public protocol or client IP.
 app.set('trust proxy', 'loopback');
+operatorApp.set('trust proxy', 'loopback');
 const server = createServer(app);
 const operatorServer = createServer(operatorApp);
 
@@ -100,7 +102,8 @@ app.use('/api', express.json({ limit: '32kb' }), workspace, editor, (_req, res) 
 });
 
 operatorApp.use(securityHeaders, (req, res, next) => {
-  if (!operatorHosts.has(req.headers.host || '')) {
+  const host = req.headers.host || '';
+  if (!operatorHosts.has(host) && !(operatorExternal && host === operatorExternal.host && req.secure)) {
     res.sendStatus(404);
     return;
   }
@@ -119,7 +122,7 @@ operatorApp.use((req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
-operatorApp.use('/operator/api', sameOrigin((host) => `http://${host}`), express.json({ limit: '8kb' }));
+operatorApp.use('/operator/api', sameOrigin((host) => host === operatorExternal?.host ? operatorExternal.origin : `http://${host}`), express.json({ limit: '8kb' }));
 operatorApp.use(operatorAuth);
 operatorApp.use('/operator/api', (_req, res) => { res.status(404).json({ error: '找不到这个接口。' }); });
 operatorApp.use('/api', (_req, res) => { res.sendStatus(404); });
@@ -179,7 +182,7 @@ recoverPublishQueue();
 runPublishQueue();
 queue = setInterval(runPublishQueue, 2000);
 console.log(`Node X 工作台 ${external?.origin || `http://127.0.0.1:${port}`}`);
-console.log(`Node X 登录码管理 http://${operatorHost}/operator`);
+console.log(`Node X 登录码管理 ${operatorExternal?.origin || `http://${operatorHost}`}/operator`);
 
 let closing = false;
 async function shutdown() {

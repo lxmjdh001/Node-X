@@ -1,6 +1,6 @@
 # Debian 12 deployment
 
-Public workbench: `https://xai.chuhai7.com`. Nginx forwards only to `127.0.0.1:4173`; the operator listener stays on `127.0.0.1:4174`. Use Node 24 at `/usr/bin/node` and the existing Nginx installation. These files are templates; they do not change a server by themselves.
+Public workbench: `https://xai.chuhai7.com`. Nginx forwards the workbench to `127.0.0.1:4173` and the HTTPS `/operator` route to `127.0.0.1:4174`. Use Node 24 at `/usr/bin/node` and the existing Nginx installation. These files are templates; they do not change a server by themselves.
 
 ## Service and releases
 
@@ -14,6 +14,7 @@ PORT=4173
 NODEX_OPERATOR_PORT=4174
 NODEX_OPERATOR_ACCESS_PORT=7414
 NODEX_PUBLIC_ORIGIN=https://xai.chuhai7.com
+NODEX_OPERATOR_PUBLIC_ORIGIN=https://xai.chuhai7.com
 NODEX_DATA_DIR=/var/lib/nodex
 ```
 
@@ -70,14 +71,7 @@ systemctl list-timers --all certbot.timer
 
 ## Operator access and checks
 
-From the registered Mac Chrome browser's computer, keep this SSH tunnel open:
-
-```sh
-ssh -N -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:7414:127.0.0.1:4174 root@76.13.190.112
-```
-
-Open `http://127.0.0.1:7414/operator`. `NODEX_OPERATOR_ACCESS_PORT=7414` makes the private Host/Origin checks match this local port. The public Nginx site returns 404 for `/operator` and its subpaths and never forwards to port 4174.
+Open `https://xai.chuhai7.com/operator` in Mac Chrome. Browser headers are an entry filter. The login-code API still requires the registered browser key and administrator password. Enroll on the HTTPS origin because IndexedDB storage is origin-specific.
 
 After each release, check `systemctl is-active nodex`, confirm both application ports bind only to `127.0.0.1`, and verify:
 
@@ -87,4 +81,4 @@ curl --silent --output /dev/null --write-out '%{http_code}\n' \
   https://xai.chuhai7.com/operator
 ```
 
-Expect `{"ok":true}` and `404`. Check the private operator page through the tunnel separately. Any planned Mailu shutdown happens only after the new workbench passes health checks; this template does not stop containers or alter `aimv`, `ipip2`, or other sites.
+Expect `{"ok":true}` and `403` for curl without Mac Chrome headers. Check the operator page on HTTPS in Mac Chrome. Any planned Mailu shutdown happens only after the new workbench passes health checks; this template does not stop containers or alter `aimv`, `ipip2`, or other sites.

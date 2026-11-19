@@ -80,10 +80,8 @@ function cleanup(now = Date.now()): void {
 }
 
 function bucket(req: Request, scope: string): string {
-  // Public login uses Express's resolved client IP. The public app configures
-  // trust only for its loopback reverse proxy, which must overwrite XFF.
-  // Operator limits always use the actual socket peer, regardless of headers.
-  const address = scope === 'login-failures' ? req.ip ?? req.socket.remoteAddress : req.socket.remoteAddress;
+  // Both listeners trust only their loopback reverse proxy, which overwrites XFF.
+  const address = req.ip ?? req.socket.remoteAddress;
   return hash(`${scope}:${address ?? 'unknown'}`);
 }
 

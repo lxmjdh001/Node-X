@@ -180,7 +180,7 @@ export default function OperatorApp() {
     try {
       if (!window.isSecureContext || !crypto.subtle || !window.indexedDB)
         throw new Error(
-          "浏览器密钥需要安全的本地页面，请在 Mac Chrome 中使用 127.0.0.1 地址打开生成器。",
+          "浏览器密钥需要安全页面，请在 Mac Chrome 中通过 HTTPS 打开生成器。",
         );
       const [next, savedKey] = await Promise.all([
         operatorRequest<OperatorState>("state"),
@@ -224,7 +224,7 @@ export default function OperatorApp() {
         </div>
         <span className="operator-local">
           <span />
-          仅本机入口
+          Mac Chrome 管理入口
         </span>
       </header>
       <main className="operator-main">
@@ -546,7 +546,7 @@ export default function OperatorApp() {
         )}
         <p className="access-footer">
           Node X<span />
-          本机管理工具
+          登录码管理工具
         </p>
       </main>
     </div>
