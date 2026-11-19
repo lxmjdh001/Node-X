@@ -3,12 +3,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { beginXAuthorization, ContentError, contentStatus, finishXAuthorization, generateDraft, validatePostText } from './content.js';
 import { InputError, requireFound } from './errors.js';
-import { publishable, runPublishQueue } from './publisher.js';
-import { row, seal, write } from './store.js';
+import { publishable, scheduleWorkspace } from './publisher.js';
+import { row, seal, workspaceId, write } from './store.js';
+import { workspaceAuthorized } from './auth.js';
 import { accountById } from './workspace.js';
 
 export const editor = Router();
-const pending = new Map<string, { accountId: string; verifier: string; nonce: string; expires: number }>();
+const pending = new Map<string, { workspace: string | undefined; accountId: string; verifier: string; nonce: string; expires: number }>();
 const oauthCookie = 'nodex_oauth';
 const cookieOptions = { httpOnly: true, sameSite: 'lax' as const, path: '/api/x' };
 const ok = { ok: true };
@@ -45,8 +46,8 @@ editor.get('/x/connect/:accountId', (req, res) => {
   const maxAge = 10 * 60 * 1000;
   for (const [key, item] of pending) if (item.expires <= Date.now()) pending.delete(key);
   if (pending.size >= 100) throw new InputError('授权请求过多，请稍后再试。', 429);
-  pending.set(state, { accountId: account.id, verifier: codeVerifier, nonce, expires: Date.now() + maxAge });
-  res.cookie(oauthCookie, nonce, { ...cookieOptions, maxAge }).redirect(url);
+  pending.set(state, { workspace: workspaceId(), accountId: account.id, verifier: codeVerifier, nonce, expires: Date.now() + maxAge });
+  res.cookie(oauthCookie, nonce, { ...cookieOptions, secure: req.secure, maxAge }).redirect(url);
 });
 
 editor.get('/x/callback', async (req, res) => {
@@ -54,15 +55,16 @@ editor.get('/x/callback', async (req, res) => {
   const code = typeof req.query.code === 'string' ? req.query.code : '';
   const entry = pending.get(state);
   const cookie = req.headers.cookie?.match(/(?:^|;\s*)nodex_oauth=([^;]+)/)?.[1];
-  if (!entry || entry.nonce !== cookie || entry.expires <= Date.now()) {
+  if (!entry || entry.workspace !== workspaceId() || entry.nonce !== cookie || entry.expires <= Date.now()) {
     res.redirect('/?x=error&reason=expired');
     return;
   }
   pending.delete(state);
-  res.clearCookie(oauthCookie, cookieOptions);
+  res.clearCookie(oauthCookie, { ...cookieOptions, secure: req.secure });
   try {
     if (!code) throw new Error('Authorization declined.');
     const result = await finishXAuthorization(code, entry.verifier);
+    if (!workspaceAuthorized(entry.workspace)) throw new Error('Workspace no longer authorized.');
     const account = accountById(entry.accountId);
     assertAccountIdle(account.id);
     if ((account.username && account.username.toLowerCase() !== result.username.toLowerCase()) ||
@@ -131,7 +133,7 @@ editor.post('/drafts/:id/publish', (req, res) => {
     WHERE id = ? AND ${publishable}`, text, time.toISOString(), draft.id)) {
     throw new InputError('这条记录无法再次发布。', 409);
   }
-  runPublishQueue();
+  scheduleWorkspace(workspaceId());
   res.status(202).json(ok);
 });
 

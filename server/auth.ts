@@ -122,6 +122,12 @@ function sessionFor(req: Request): Session | undefined {
   `).get(hash(`session:${token}`), now, now) as Session | undefined;
 }
 
+export function workspaceAuthorized(customerId: string | undefined): boolean {
+  return customerId === undefined || Boolean(db.prepare(
+    "SELECT 1 FROM auth_licenses WHERE id = ? AND scope = 'customer' AND expiresAt > ? AND revokedAt IS NULL",
+  ).get(customerId, Date.now()));
+}
+
 function cleanup(now = Date.now()): void {
   db.prepare('DELETE FROM auth_challenges WHERE expiresAt <= ?').run(now);
   db.prepare('DELETE FROM auth_operator_sessions WHERE expiresAt <= ?').run(now);

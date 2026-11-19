@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 
@@ -36,22 +36,35 @@ export function reveal(value: string): string {
   return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString('utf8');
 }
 
-const workspace = new AsyncLocalStorage<string>();
+const workspace = new AsyncLocalStorage<string | null>();
 const customers = new Map<string, DatabaseSync>();
 const MAX_OPEN_DATABASES = 32;
+const CUSTOMER_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 export function isCustomerWorkspace(): boolean {
-  return workspace.getStore() !== undefined;
+  return workspaceId() !== undefined;
+}
+
+export function workspaceId(): string | undefined {
+  return workspace.getStore() ?? undefined;
 }
 
 export function runInWorkspace<T>(customerId: string | undefined, action: () => T): T {
-  return customerId ? workspace.run(customerId, action) : action();
+  return workspace.run(customerId ?? null, action);
+}
+
+export function customerWorkspaceIds(): string[] {
+  const directory = resolve(dataDirectory, 'customers');
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && CUSTOMER_ID.test(entry.name))
+    .map((entry) => entry.name);
 }
 
 export function workspaceDirectory(): string {
   const id = workspace.getStore();
   if (!id) return dataDirectory;
-  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)) throw new Error('Invalid workspace ID');
+  if (!CUSTOMER_ID.test(id)) throw new Error('Invalid workspace ID');
   return resolve(dataDirectory, 'customers', id);
 }
 

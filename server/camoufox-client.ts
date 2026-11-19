@@ -3,6 +3,7 @@ import { isIP } from 'node:net';
 import { domainToASCII } from 'node:url';
 import { z } from 'zod';
 import { InputError } from './errors.js';
+import { workspaceId } from './store.js';
 
 // CPM 0.7.0 contracts: https://github.com/polyackiy/camoufox-profile-manager/blob/v0.7.0/docs/api.md
 // Browser status verifies the active installed bundle and required resources; it is not a profile's claimed UA.
@@ -55,8 +56,27 @@ export class CamoufoxClientError extends InputError {
   ) { super(message, status); this.name = 'CamoufoxClientError'; }
 }
 
+const managerMap = z.record(z.uuid(), z.object({
+  port: z.number().int().min(1).max(65535),
+  apiKey: z.string().min(1).max(4096),
+}));
+function loadManagerMap() {
+  try {
+    return managerMap.parse(JSON.parse(process.env.NODEX_CUSTOMER_CAMOUFOX || '{}'));
+  } catch {
+    throw new Error('NODEX_CUSTOMER_CAMOUFOX 配置无效。');
+  }
+}
+const isolatedManagers = loadManagerMap();
+const mainPort = process.env.CAMOUFOX_PORT ?? process.env.CPM_PORT;
+const managerPorts = Object.values(isolatedManagers).map(({ port }) => port);
+if (new Set(managerPorts).size !== managerPorts.length || managerPorts.includes(Number(mainPort))) {
+  throw new Error('每个客户的 Camoufox 管理器端口必须独立。');
+}
+
 function portSetting(): string | undefined {
-  return process.env.CAMOUFOX_PORT ?? process.env.CPM_PORT;
+  const customer = workspaceId();
+  return customer ? isolatedManagers[customer]?.port.toString() : mainPort;
 }
 
 /** Explicitly setting CAMOUFOX_PORT (or its CPM_PORT alias) enables this local-only adapter. */
@@ -97,7 +117,8 @@ function clientError(status: number, code: string | undefined, mutation: boolean
 async function callManager(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown, timeout = 10_000): Promise<unknown> {
   const port = configuredPort();
   const mutation = method === 'POST';
-  const apiKey = process.env.CAMOUFOX_API_KEY;
+  const customer = workspaceId();
+  const apiKey = customer ? isolatedManagers[customer]?.apiKey : process.env.CAMOUFOX_API_KEY;
   if (apiKey && (!/^[\x20-\x7e]{1,4096}$/.test(apiKey) || !apiKey.trim())) {
     throw new CamoufoxClientError('服务端 CAMOUFOX_API_KEY 格式无效。', 503, 'manager_key_invalid');
   }

@@ -13,7 +13,8 @@ import {
   type ManagerProfile,
 } from './camoufox-client.js';
 import { InputError } from './errors.js';
-import { row, rows, write } from './store.js';
+import { publicProxy } from './public-proxy.js';
+import { isCustomerWorkspace, row, rows, write } from './store.js';
 import { accountById, openProxy, profileById, proxyById } from './workspace.js';
 
 export const camoufox = Router();
@@ -26,21 +27,24 @@ const linkInput = z.object({
   profileId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
 });
 
-let operating = false;
+const operating = new Set<number>();
 
 async function operation<T>(action: () => Promise<T>): Promise<T> {
-  if (operating) throw new InputError('Camoufox 正在处理另一项操作，请在完成后重试。', 409);
-  operating = true;
+  const port = portOrThrow();
+  if (operating.has(port)) throw new InputError('Camoufox 正在处理另一项操作，请在完成后重试。', 409);
+  operating.add(port);
   try {
     return await action();
   } finally {
-    operating = false;
+    operating.delete(port);
   }
 }
 
 function portOrThrow() {
   const port = managerPort();
-  if (port === null) throw new InputError('请在 .env 中配置 CAMOUFOX_PORT 后重启 Node X。', 409);
+  if (port === null) throw new InputError(isCustomerWorkspace()
+    ? '此工作空间尚未配置独立的 Camoufox 管理器。'
+    : '请在 .env 中配置 CAMOUFOX_PORT 后重启 Node X。', 409);
   return port;
 }
 
@@ -158,7 +162,8 @@ camoufox.post('/create', async (req, res) => {
         setLink(port, current.accountId, matches[0]);
         return { status: 'ok', message: '已恢复与原 Camoufox 环境的关联。' };
       }
-      const proxy = openProxy(proxyById(current.proxyId));
+      const configuration = openProxy(proxyById(current.proxyId));
+      const proxy = isCustomerWorkspace() ? await publicProxy(configuration) : configuration;
       write('INSERT INTO camoufox_links (managerPort, accountId, profileId, name) VALUES (?, ?, NULL, ?)', port, current.accountId, name);
       let created: ManagerProfile;
       try {

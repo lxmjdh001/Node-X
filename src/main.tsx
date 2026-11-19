@@ -46,6 +46,7 @@ import {
   X,
 } from "lucide-react";
 import OperatorApp from "./operator";
+import { BrowserView } from "./browser-view";
 import "./styles.css";
 
 type Account = {
@@ -102,6 +103,8 @@ type Workspace = {
   settings: { aiConfigured: boolean; xConfigured: boolean };
   chromium?: { installed: boolean; version: string | null };
   workspaceScope?: "owner" | "customer";
+  remoteBrowser?: boolean;
+  camoufoxConfigured?: boolean;
   version: string;
 };
 type ImportFormat = "nodex" | "camoufox";
@@ -396,6 +399,12 @@ function App({
   );
   const [data, setData] = useState<Workspace>(blank);
   const customer = data.workspaceScope === "customer";
+  const showCamoufox =
+    data.workspaceScope === "owner" || data.camoufoxConfigured;
+  const [viewingBrowser, setViewingBrowser] = useState<{
+    profile: Profile;
+    draftText?: string;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
   const [modal, setModal] = useState<EntityModal | null>(null);
@@ -439,9 +448,24 @@ function App({
     }
   };
   useEffect(() => {
-    if (page === "profiles" && data.workspaceScope === "owner")
-      void refreshCamoufox();
-  }, [page, data.workspaceScope]);
+    if (page === "profiles" && showCamoufox) void refreshCamoufox();
+  }, [page, showCamoufox]);
+  useEffect(() => {
+    if (loading || !data.remoteBrowser) return;
+    const target = new URL(location.href);
+    const profileId = target.searchParams.get("browser");
+    if (!profileId) return;
+    target.searchParams.delete("browser");
+    history.replaceState(
+      null,
+      "",
+      target.pathname + target.search + target.hash,
+    );
+    const profile = data.profiles.find(
+      (item) => item.id === profileId && item.running,
+    );
+    if (profile) setViewingBrowser({ profile });
+  }, [data, loading]);
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => {
@@ -507,6 +531,51 @@ function App({
   };
   const run = (key: string, path: string, success: string) => {
     void mutate(key, path, "POST", undefined, success).catch(() => {});
+  };
+  const openBrowser = async (profile: Profile, draftText?: string) => {
+    try {
+      if (!profile.running)
+        await mutate(
+          profile.id,
+          `/api/profiles/${profile.id}/start`,
+          "POST",
+          undefined,
+          "浏览器环境已打开",
+        );
+      if (data.remoteBrowser) setViewingBrowser({ profile, draftText });
+      return true;
+    } catch {
+      // mutate has already shown the error.
+      return false;
+    }
+  };
+  const openDraftInX = async (draft: Draft) => {
+    const profile = data.profiles.find(
+      (item) => item.accountId === draft.accountId,
+    );
+    if (!profile) {
+      setToast({
+        text: "请先为此账号绑定 SOCKS5 代理并创建浏览器环境。",
+        error: true,
+      });
+      return;
+    }
+    if (data.remoteBrowser) {
+      await openBrowser(profile, draft.text);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(draft.text);
+    } catch {
+      setToast({
+        text: "复制失败，请先在编辑页选中正文并手动复制。",
+        error: true,
+      });
+      return;
+    }
+    if (await openBrowser(profile)) {
+      setToast({ text: "正文已复制。请在 X 网页粘贴并确认发布。" });
+    }
   };
   const accountName = (id: string) =>
     data.accounts.find((a) => a.id === id)?.label || "未关联账号";
@@ -584,7 +653,7 @@ function App({
           <thead>
             <tr>
               <th>账号</th>
-              <th>X 授权</th>
+              {data.settings.xConfigured && <th>X 授权</th>}
               <th>浏览器环境</th>
               <th>代理出口</th>
               <th className="align-right">操作</th>
@@ -613,13 +682,15 @@ function App({
                       </div>
                     </div>
                   </td>
-                  <td>
-                    <Badge tone={account.xConnected ? "green" : "neutral"}>
-                      {account.xConnected
-                        ? `已连接${account.xUsername ? ` @${account.xUsername.replace(/^@/, "")}` : ""}`
-                        : "未授权"}
-                    </Badge>
-                  </td>
+                  {data.settings.xConfigured && (
+                    <td>
+                      <Badge tone={account.xConnected ? "green" : "neutral"}>
+                        {account.xConnected
+                          ? `已连接${account.xUsername ? ` @${account.xUsername.replace(/^@/, "")}` : ""}`
+                          : "未授权"}
+                      </Badge>
+                    </td>
+                  )}
                   <td>
                     {profile ? (
                       <div className="cell-stack">
@@ -650,11 +721,20 @@ function App({
                   </td>
                   <td>
                     <div className="row-actions">
-                      {!account.xConnected ? (
+                      {!data.settings.xConfigured ? (
+                        <Button
+                          variant="ghost"
+                          icon={Monitor}
+                          disabled={!profile}
+                          busy={busy === profile?.id}
+                          onClick={() => profile && void openBrowser(profile)}
+                        >
+                          打开 X
+                        </Button>
+                      ) : !account.xConnected ? (
                         <Button
                           variant="ghost"
                           icon={Link2}
-                          disabled={!data.settings.xConfigured}
                           onClick={() => {
                             location.href = `/api/x/connect/${account.id}`;
                           }}
@@ -850,7 +930,7 @@ function App({
               <p>{pageInfo[1]}</p>
             </div>
             <div className="heading-action">
-              {page === "profiles" && !customer && (
+              {page === "profiles" && showCamoufox && (
                 <Button
                   icon={Fingerprint}
                   onClick={() => {
@@ -1065,15 +1145,19 @@ function App({
                           <Icon icon={Link2} size={18} />
                         </span>
                         <div>
-                          <strong>X 发布接口</strong>
+                          <strong>
+                            {data.settings.xConfigured
+                              ? "X 发布接口"
+                              : "X 网页登录"}
+                          </strong>
                           <small>
                             {data.settings.xConfigured
                               ? `${connected} 个账号已完成授权`
-                              : "配置开发者应用后连接账号"}
+                              : "使用已绑定的独立浏览器"}
                           </small>
                         </div>
                         <span
-                          className={`state-dot ${data.settings.xConfigured ? "ok" : ""}`}
+                          className={`state-dot ${data.settings.xConfigured || data.chromium?.installed ? "ok" : ""}`}
                         />
                       </div>
                       <button
@@ -1112,13 +1196,13 @@ function App({
                     <div className="inline-notice">
                       <Icon icon={Link2} size={16} />
                       <span>
-                        配置 X 开发者应用后，即可连接账号授权并发布内容。
+                        绑定浏览器环境后，点击「打开 X」在网页内登录。
                       </span>
                       <button
                         className="text-button"
-                        onClick={() => go("settings")}
+                        onClick={() => go("profiles")}
                       >
-                        前往设置
+                        浏览器环境
                       </button>
                     </div>
                   )}
@@ -1253,7 +1337,6 @@ function App({
                                       <Button
                                         variant="ghost"
                                         icon={RefreshCw}
-                                        disabled={customer}
                                         busy={busy === `check-${proxy.id}`}
                                         onClick={() =>
                                           run(
@@ -1303,40 +1386,39 @@ function App({
               )}
               {page === "profiles" && (
                 <>
-                  {customer ? (
-                    <div className="inline-notice standalone">
-                      <Icon icon={CircleHelp} size={16} />
-                      客户空间可保存配置。共享浏览器和代理检测在主空间执行。
-                    </div>
-                  ) : (
-                    <div className="engine-grid">
-                      <section className="engine-panel">
-                        <span className="info-banner-icon">
-                          <Icon icon={Monitor} size={21} />
-                        </span>
-                        <div className="engine-copy">
-                          <h2>
-                            本地 Chromium
-                            <Badge
-                              tone={
-                                data.chromium?.installed ? "green" : "neutral"
-                              }
-                            >
-                              {data.chromium?.installed ? "已安装" : "未安装"}
-                            </Badge>
-                          </h2>
-                          <p>
-                            {data.chromium?.installed
-                              ? `真实版本 ${data.chromium.version || "待读取"}。每个账号使用独立目录保存会话。`
+                  <div className="engine-grid">
+                    <section className="engine-panel">
+                      <span className="info-banner-icon">
+                        <Icon icon={Monitor} size={21} />
+                      </span>
+                      <div className="engine-copy">
+                        <h2>
+                          {data.remoteBrowser
+                            ? "在线 Chromium"
+                            : "本地 Chromium"}
+                          <Badge
+                            tone={
+                              data.chromium?.installed ? "green" : "neutral"
+                            }
+                          >
+                            {data.chromium?.installed ? "已安装" : "未安装"}
+                          </Badge>
+                        </h2>
+                        <p>
+                          {data.chromium?.installed
+                            ? `真实版本 ${data.chromium.version || "待读取"}。每个账号使用独立目录保存会话。`
+                            : customer
+                              ? "服务器尚未安装浏览器，请联系管理员。"
                               : "安装 Playwright 浏览器后，即可打开下方配置的独立环境。"}
-                          </p>
-                          {!data.chromium?.installed && (
-                            <code className="engine-command">
-                              npm run browser:install
-                            </code>
-                          )}
-                        </div>
-                      </section>
+                        </p>
+                        {!data.chromium?.installed && !customer && (
+                          <code className="engine-command">
+                            npm run browser:install
+                          </code>
+                        )}
+                      </div>
+                    </section>
+                    {showCamoufox && (
                       <section className="engine-panel">
                         <span className="info-banner-icon">
                           <Icon icon={Fingerprint} size={21} />
@@ -1389,8 +1471,8 @@ function App({
                           </button>
                         </div>
                       </section>
-                    </div>
-                  )}
+                    )}
+                  </div>
                   {(!data.accounts.length || !data.proxies.length) && (
                     <div className="inline-notice standalone">
                       <Icon icon={CircleHelp} size={16} />
@@ -1430,11 +1512,7 @@ function App({
                       <Empty
                         icon={Fingerprint}
                         title="为账号创建独立环境"
-                        description={
-                          customer
-                            ? "关联账号和代理以保存环境配置。"
-                            : "关联账号和代理后，即可打开浏览器并人工登录 X。"
-                        }
+                        description="关联账号和代理后，即可打开浏览器并手动登录 X。"
                         action={addButton(
                           "profile",
                           "创建环境",
@@ -1504,26 +1582,48 @@ function App({
                                   <td>
                                     <div className="row-actions">
                                       <Button
-                                        icon={profile.running ? Square : Play}
+                                        icon={
+                                          profile.running && !data.remoteBrowser
+                                            ? Square
+                                            : Play
+                                        }
                                         variant={
                                           profile.running
                                             ? "secondary"
                                             : "primary"
                                         }
                                         busy={busy === profile.id}
-                                        disabled={customer}
                                         onClick={() =>
-                                          run(
-                                            profile.id,
-                                            `/api/profiles/${profile.id}/${profile.running ? "stop" : "start"}`,
-                                            profile.running
-                                              ? "环境已关闭"
-                                              : "浏览器环境已打开",
-                                          )
+                                          profile.running && !data.remoteBrowser
+                                            ? run(
+                                                profile.id,
+                                                `/api/profiles/${profile.id}/stop`,
+                                                "环境已关闭",
+                                              )
+                                            : void openBrowser(profile)
                                         }
                                       >
-                                        {profile.running ? "关闭" : "打开"}
+                                        {profile.running
+                                          ? data.remoteBrowser
+                                            ? "进入浏览器"
+                                            : "关闭"
+                                          : "打开"}
                                       </Button>
+                                      {profile.running &&
+                                        data.remoteBrowser && (
+                                          <IconButton
+                                            icon={Square}
+                                            label={`关闭 ${profile.label}`}
+                                            disabled={busy === profile.id}
+                                            onClick={() =>
+                                              run(
+                                                profile.id,
+                                                `/api/profiles/${profile.id}/stop`,
+                                                "环境已关闭",
+                                              )
+                                            }
+                                          />
+                                        )}
                                       <IconButton
                                         icon={Pencil}
                                         label={`编辑 ${profile.label}`}
@@ -1734,18 +1834,40 @@ function App({
                                       >
                                         编辑
                                       </Button>
-                                      <Button
-                                        icon={Send}
-                                        disabled={
-                                          !draft.text.trim() ||
-                                          !data.accounts.find(
-                                            (a) => a.id === draft.accountId,
-                                          )?.xConnected
-                                        }
-                                        onClick={() => setPublishing(draft)}
-                                      >
-                                        发布
-                                      </Button>
+                                      {data.settings.xConfigured ? (
+                                        <Button
+                                          icon={Send}
+                                          disabled={
+                                            !draft.text.trim() ||
+                                            !data.accounts.find(
+                                              (a) => a.id === draft.accountId,
+                                            )?.xConnected
+                                          }
+                                          onClick={() => setPublishing(draft)}
+                                        >
+                                          发布
+                                        </Button>
+                                      ) : (
+                                        <Button
+                                          icon={Copy}
+                                          disabled={
+                                            !draft.text.trim() ||
+                                            data.profiles.some(
+                                              (item) =>
+                                                item.accountId ===
+                                                  draft.accountId &&
+                                                busy === item.id,
+                                            )
+                                          }
+                                          onClick={() =>
+                                            void openDraftInX(draft)
+                                          }
+                                        >
+                                          {data.remoteBrowser
+                                            ? "打开 X 发文"
+                                            : "复制并打开 X"}
+                                        </Button>
+                                      )}
                                     </>
                                   ) : null}
                                   {draft.status !== "publishing" &&
@@ -1767,7 +1889,9 @@ function App({
                   </section>
                   <p className="page-footnote">
                     <Icon icon={ShieldCheck} size={14} />
-                    发布前需要你确认目标账号与正文。排程依赖本地服务持续运行。
+                    {data.settings.xConfigured
+                      ? "发布前请确认目标账号和正文。定时发布需要 Node X 服务持续运行。"
+                      : "在 X 网页确认账号和正文后，手动点击发布。"}
                   </p>
                 </>
               )}
@@ -1790,19 +1914,22 @@ function App({
                     </div>
                     <div className="settings-content">
                       <p>
-                        在项目根目录的 <code>.env</code>{" "}
-                        中配置以下变量，然后重启本地服务。
+                        {customer
+                          ? data.settings.aiConfigured
+                            ? "可在内容创作页生成草稿。"
+                            : "管理员配置模型后，即可生成草稿。"
+                          : "在服务端设置模型变量后，重启 Node X。"}
                       </p>
-                      <CodeBlock
-                        text={
-                          "AI_BASE_URL=https://api.example.com/v1\nAI_API_KEY=你的模型密钥\nAI_MODEL=你的模型名称"
-                        }
-                      />
+                      {!customer && (
+                        <CodeBlock
+                          text={
+                            "AI_BASE_URL=https://api.example.com/v1\nAI_API_KEY=你的模型密钥\nAI_MODEL=你的模型名称"
+                          }
+                        />
+                      )}
                       <div className="helper-note">
                         <Icon icon={ShieldCheck} size={16} />
-                        <p>
-                          密钥仅由本地服务读取。此页面不会显示或传输已保存的密钥。
-                        </p>
+                        <p>模型密钥由服务器保存。</p>
                       </div>
                     </div>
                   </section>
@@ -1812,29 +1939,40 @@ function App({
                         <Icon icon={Link2} size={23} />
                       </span>
                       <div>
-                        <h2>X 发布授权</h2>
-                        <p>通过 X 官方接口为已授权账号发布内容。</p>
+                        <h2>
+                          {data.settings.xConfigured
+                            ? "X 发布授权"
+                            : "X 网页登录"}
+                        </h2>
+                        <p>
+                          {data.settings.xConfigured
+                            ? "通过 X 官方接口为已授权账号发布内容。"
+                            : "使用每个账号绑定的独立 Chromium 浏览器。"}
+                        </p>
                       </div>
                       <Badge
                         tone={data.settings.xConfigured ? "green" : "neutral"}
                       >
-                        {data.settings.xConfigured ? "已配置" : "未配置"}
+                        {data.settings.xConfigured ? "已配置" : "浏览器模式"}
                       </Badge>
                     </div>
                     <div className="settings-content">
                       <p>
-                        在 X 开发者平台创建应用，配置读写权限，并将凭据填入{" "}
-                        <code>.env</code>。
+                        {data.settings.xConfigured
+                          ? "前往账号管理，连接需要发文的 X 账号。"
+                          : "在 X 网页完成登录。下次打开同一个环境时可继续使用已保存的会话。"}
                       </p>
-                      <CodeBlock
-                        text={
-                          "X_CLIENT_ID=你的应用客户端ID\nX_CLIENT_SECRET=你的应用客户端密钥\nX_REDIRECT_URI=http://127.0.0.1:4173/api/x/callback"
-                        }
-                      />
-                      <p className="settings-hint">
-                        回调地址需要与 X
-                        开发者平台的设置完全一致。配置完成后，前往账号管理连接各个账号。
-                      </p>
+                      {!customer && data.settings.xConfigured && (
+                        <>
+                          <CodeBlock
+                            text={`X_CLIENT_ID=你的应用客户端ID\nX_CLIENT_SECRET=你的应用客户端密钥\nX_REDIRECT_URI=${location.origin}/api/x/callback`}
+                          />
+                          <p className="settings-hint">
+                            回调地址需要与 X
+                            开发者平台的设置完全一致。配置完成后，前往账号管理连接各个账号。
+                          </p>
+                        </>
+                      )}
                       <Button icon={Users} onClick={() => go("accounts")}>
                         前往账号管理
                       </Button>
@@ -1929,6 +2067,32 @@ function App({
           onWorkspaceChanged={() => refresh()}
           onClose={() => setCamoufoxOpen(false)}
         />
+      )}
+      {viewingBrowser && (
+        <Dialog
+          title={viewingBrowser.profile.label}
+          description="点击画面操作 X。离开画面请按 Esc。"
+          onClose={() => setViewingBrowser(null)}
+          className="remote-browser-dialog"
+        >
+          <BrowserView
+            id={viewingBrowser.profile.id}
+            draftText={viewingBrowser.draftText}
+            onStop={() => {
+              const { id } = viewingBrowser.profile;
+              void mutate(
+                id,
+                `/api/profiles/${id}/stop`,
+                "POST",
+                undefined,
+                "环境已关闭",
+              ).then(
+                () => setViewingBrowser(null),
+                () => {},
+              );
+            }}
+          />
+        </Dialog>
       )}
       {confirmation && (
         <Dialog

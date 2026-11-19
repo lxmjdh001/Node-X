@@ -4,16 +4,28 @@ import { isIP } from 'node:net';
 import { resolve } from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
-import { browserVersion, checkProxy, chromiumInfo, startBrowser, stopBrowser } from './browser.js';
+import { browserFrame, browserVersion, checkProxy, chromiumInfo, remoteBrowser, sendBrowserInput, startBrowser, stopBrowser } from './browser.js';
+import { managerPort } from './camoufox-client.js';
 import { contentStatus } from './content.js';
 import { InputError, requireFound } from './errors.js';
-import { isCustomerWorkspace, workspaceDirectory, reveal, row, rows, seal, write } from './store.js';
+import { publicProxy } from './public-proxy.js';
+import { isCustomerWorkspace, workspaceDirectory, workspaceId, reveal, row, rows, seal, write } from './store.js';
 
 export const workspace = Router();
 const checkingProxies = new Set<string>();
 const busyProfiles = new Set<string>();
 const now = () => new Date().toISOString();
 const ok = { ok: true };
+const operationKey = (id: string) => `${workspaceId() ?? 'owner'}:${id}`;
+const pointer = { x: z.number().min(0).max(1), y: z.number().min(0).max(1) };
+const browserInput = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('click'), ...pointer }),
+  z.object({ type: z.literal('scroll'), ...pointer, delta: z.number().int().min(-1600).max(1600) }),
+  z.object({ type: z.literal('text'), text: z.string().min(1).max(8000) }),
+  z.object({ type: z.literal('key'), key: z.enum(['Backspace', 'Delete', 'Enter', 'Tab', 'Shift+Tab', 'Escape', 'Space',
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Control+a']) }),
+  z.object({ type: z.enum(['back', 'reload', 'home']) }),
+]);
 
 export type Account = {
   id: string; label: string; username: string; notes: string; createdAt: string;
@@ -91,20 +103,20 @@ export function createProfile(data: z.output<typeof profileInput>): void {
 
 function ensureProxyFree(id: string) {
   const linked = rows<{ id: string }>('SELECT id FROM profiles WHERE proxyId = ?', id);
-  if (checkingProxies.has(id) || linked.some((profile) => browserVersion(profile.id) || busyProfiles.has(profile.id))) {
+  if (checkingProxies.has(operationKey(id)) || linked.some((profile) => browserVersion(profile.id) || busyProfiles.has(operationKey(profile.id)))) {
     throw new InputError('代理正在使用，请等检查结束或先关闭关联的浏览器。', 409);
   }
 }
 
 function ensureProfileFree(id: string, allowRunning = false) {
-  if (busyProfiles.has(id) || (!allowRunning && browserVersion(id))) {
+  if (busyProfiles.has(operationKey(id)) || (!allowRunning && browserVersion(id))) {
     throw new InputError('浏览器正在使用，请等待操作完成或先关闭浏览器。', 409);
   }
 }
 
 workspace.get('/workspace', async (_req, res) => {
   const customer = isCustomerWorkspace();
-  const chromium = customer ? { installed: false, version: null } : await chromiumInfo();
+  const chromium = await chromiumInfo();
   const accounts = rows<Account>('SELECT * FROM accounts ORDER BY createdAt DESC').map(({ token, xUserId: _id, ...account }) => ({
     ...account, xConnected: Boolean(token),
   }));
@@ -117,8 +129,9 @@ workspace.get('/workspace', async (_req, res) => {
   });
   res.json({
     accounts, proxies, profiles, drafts: rows('SELECT * FROM drafts ORDER BY createdAt DESC'),
-    settings: customer ? { aiConfigured: false, xConfigured: false } : contentStatus(),
-    workspaceScope: customer ? 'customer' : 'owner', chromium, version: '0.1.0',
+    settings: contentStatus(),
+    workspaceScope: customer ? 'customer' : 'owner', chromium, remoteBrowser: remoteBrowser(),
+    camoufoxConfigured: managerPort() !== null, version: '0.1.0',
   });
 });
 
@@ -188,10 +201,12 @@ workspace.delete('/proxies/:id', (req, res) => {
 
 workspace.post('/proxies/:id/check', async (req, res) => {
   const proxy = proxyById(req.params.id);
-  if (checkingProxies.has(proxy.id)) throw new InputError('正在检查该代理。', 409);
-  checkingProxies.add(proxy.id);
+  const key = operationKey(proxy.id);
+  if (checkingProxies.has(key)) throw new InputError('正在检查该代理。', 409);
+  checkingProxies.add(key);
   try {
-    const { ip, latency } = await checkProxy(openProxy(proxy));
+    const configuration = openProxy(proxy);
+    const { ip, latency } = await checkProxy(remoteBrowser() ? await publicProxy(configuration) : configuration);
     write("UPDATE proxies SET status = 'ok', lastIp = ?, latency = ?, checkedAt = ?, checkError = NULL WHERE id = ?",
       ip, Math.round(latency), now(), proxy.id);
   } catch (error) {
@@ -200,9 +215,9 @@ workspace.post('/proxies/:id/check', async (req, res) => {
       : '代理未能通过连通性检查。请核对代理地址、认证和出站网络。';
     write("UPDATE proxies SET status = 'error', lastIp = NULL, latency = NULL, checkedAt = ?, checkError = ? WHERE id = ?",
       now(), message, proxy.id);
-    throw new InputError(message, 502);
+    throw new InputError(message, error instanceof InputError ? error.status : 502);
   } finally {
-    checkingProxies.delete(proxy.id);
+    checkingProxies.delete(key);
   }
   res.json(ok);
 });
@@ -231,41 +246,56 @@ workspace.delete('/profiles/:id', async (req, res) => {
   const { id } = profileById(req.params.id);
   ensureProfileFree(id);
   if (!z.uuid().safeParse(id).success) throw new InputError('浏览器环境标识无效。');
-  busyProfiles.add(id);
+  const key = operationKey(id);
+  busyProfiles.add(key);
   try {
     await rm(resolve(workspaceDirectory(), 'profiles', id), { recursive: true, force: true });
     write('DELETE FROM profiles WHERE id = ?', id);
     res.json(ok);
   } finally {
-    busyProfiles.delete(id);
+    busyProfiles.delete(key);
   }
 });
 
 workspace.post('/profiles/:id/start', async (req, res) => {
   const profile = profileById(req.params.id);
   ensureProfileFree(profile.id);
-  busyProfiles.add(profile.id);
+  const key = operationKey(profile.id);
+  busyProfiles.add(key);
   try {
     try {
       await startBrowser({ ...profile, proxy: openProxy(proxyById(profile.proxyId)) });
     } catch (error) {
+      if (error instanceof InputError) throw error;
       const message = error instanceof Error ? error.message : '浏览器启动失败。';
       throw new InputError(message, 502);
     }
     res.json(ok);
   } finally {
-    busyProfiles.delete(profile.id);
+    busyProfiles.delete(key);
   }
 });
 
 workspace.post('/profiles/:id/stop', async (req, res) => {
   const { id } = profileById(req.params.id);
   ensureProfileFree(id, true);
-  busyProfiles.add(id);
+  const key = operationKey(id);
+  busyProfiles.add(key);
   try {
     await stopBrowser(id);
     res.json(ok);
   } finally {
-    busyProfiles.delete(id);
+    busyProfiles.delete(key);
   }
+});
+
+workspace.get('/profiles/:id/frame', async (req, res) => {
+  const { id } = profileById(req.params.id);
+  res.type('image/jpeg').send(await browserFrame(id));
+});
+
+workspace.post('/profiles/:id/input', async (req, res) => {
+  const { id } = profileById(req.params.id);
+  await sendBrowserInput(id, browserInput.parse(req.body));
+  res.json(ok);
 });

@@ -1,7 +1,7 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText } from 'ai';
 import twitterText from 'twitter-text';
-import { ApiResponseError, TwitterApi, type TweetV2PostTweetResult } from 'twitter-api-v2';
+import { ApiResponseError, TwitterApi, type AccessOAuth2TokenResult, type TweetV2PostTweetResult } from 'twitter-api-v2';
 
 export type XToken = {
   accessToken: string;
@@ -47,7 +47,8 @@ function isHttpUrl(value: string): boolean {
 export function contentStatus(): { aiConfigured: boolean; xConfigured: boolean } {
   return {
     aiConfigured: Boolean(env('AI_API_KEY') && env('AI_MODEL') && isHttpUrl(env('AI_BASE_URL') || DEFAULT_AI_BASE_URL)),
-    xConfigured: Boolean(env('X_CLIENT_ID') && isHttpUrl(env('X_REDIRECT_URI') || DEFAULT_REDIRECT_URI)),
+    xConfigured: env('NODEX_X_PUBLISH_MODE') !== 'browser' &&
+      Boolean(env('X_CLIENT_ID') && isHttpUrl(env('X_REDIRECT_URI') || DEFAULT_REDIRECT_URI)),
   };
 }
 
@@ -119,33 +120,35 @@ export function beginXAuthorization(): { url: string; codeVerifier: string; stat
   return { url, codeVerifier, state };
 }
 
+async function exchangeXToken(fields: Record<string, string>, previousRefreshToken = ''): Promise<XToken> {
+  const result = await xClient().post<AccessOAuth2TokenResult>('https://api.x.com/2/oauth2/token', {
+    ...fields,
+    ...(env('X_CLIENT_SECRET') ? {} : { client_id: env('X_CLIENT_ID') }),
+  }, { forceBodyMode: 'url', timeout: 15_000 });
+  const refreshToken = result.refresh_token || previousRefreshToken;
+  if (!result.access_token || !refreshToken || !Number.isFinite(result.expires_in) || result.expires_in <= 0) {
+    throw new ContentError('X_MISSING_REFRESH_TOKEN', 'X 未返回完整的离线授权，请重新授权并允许 offline.access。', 502);
+  }
+  return { accessToken: result.access_token, refreshToken, expiresAt: Date.now() + result.expires_in * 1000 };
+}
+
 export async function finishXAuthorization(code: string, codeVerifier: string): Promise<{ userId: string; username: string; token: XToken }> {
   if (!code || !codeVerifier) {
     throw new ContentError('X_INVALID_CALLBACK', '授权回调不完整，请重新连接 X 账号。');
   }
-  const client = xClient();
   try {
-    const auth = await client.loginWithOAuth2({
-      code,
-      codeVerifier,
-      redirectUri: env('X_REDIRECT_URI') || DEFAULT_REDIRECT_URI,
+    const token = await exchangeXToken({
+      grant_type: 'authorization_code', code, code_verifier: codeVerifier,
+      redirect_uri: env('X_REDIRECT_URI') || DEFAULT_REDIRECT_URI,
     });
-    if (!auth.accessToken || !auth.refreshToken || !Number.isFinite(auth.expiresIn) || auth.expiresIn <= 0) {
-      throw new ContentError('X_MISSING_REFRESH_TOKEN', 'X 未返回完整的离线授权，请重新授权并允许 offline.access。', 502);
-    }
-    const expiresAt = Date.now() + auth.expiresIn * 1_000;
-    const { data: user } = await auth.client.v2.me();
+    const { data: user } = await new TwitterApi(token.accessToken).v2.me();
     if (!user?.id || !user.username) {
       throw new ContentError('X_IDENTITY_FAILED', '未能确认 X 账号身份，请重新连接。', 502);
     }
     return {
       userId: user.id,
       username: user.username,
-      token: {
-        accessToken: auth.accessToken,
-        refreshToken: auth.refreshToken,
-        expiresAt,
-      },
+      token,
     };
   } catch (error) {
     if (error instanceof ContentError) throw error;
@@ -161,15 +164,7 @@ async function refreshedToken(token: XToken): Promise<XToken> {
   if (!pending) {
     pending = (async () => {
       try {
-        const auth = await xClient().refreshOAuth2Token(token.refreshToken);
-        if (!auth.accessToken || !Number.isFinite(auth.expiresIn) || auth.expiresIn <= 0) {
-          throw new Error('Invalid refresh response');
-        }
-        return {
-          accessToken: auth.accessToken,
-          refreshToken: auth.refreshToken || token.refreshToken,
-          expiresAt: Date.now() + auth.expiresIn * 1_000,
-        };
+        return await exchangeXToken({ grant_type: 'refresh_token', refresh_token: token.refreshToken }, token.refreshToken);
       } catch {
         throw new ContentError('X_REFRESH_FAILED', 'X 授权续期失败，尚未发送帖文，请重新连接账号后重试。', 409);
       }
@@ -213,6 +208,7 @@ export async function publishX(
   token: XToken,
   text: string,
   updateToken: (token: XToken) => void,
+  assertAuthorized: () => void,
 ): Promise<{ postId: string }> {
   const body = validatePostText(text);
   if (!token?.accessToken || !Number.isFinite(token.expiresAt)) {
@@ -228,6 +224,7 @@ export async function publishX(
       throw new ContentError('X_TOKEN_SAVE_FAILED', '续期授权未能保存，尚未发送帖文，请重新连接账号。', 500);
     }
   }
+  assertAuthorized();
   try {
     const client = new TwitterApi(activeToken.accessToken);
     // SDK's tweet() uses this same endpoint. The low-level method additionally

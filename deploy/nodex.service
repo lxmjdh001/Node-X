@@ -17,6 +17,8 @@ Environment=NODEX_OPERATOR_ACCESS_PORT=7414
 Environment=NODEX_PUBLIC_ORIGIN=https://xai.chuhai7.com
 Environment=NODEX_OPERATOR_PUBLIC_ORIGIN=https://xai.chuhai7.com
 Environment=NODEX_DATA_DIR=/var/lib/nodex
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/lib/nodex/ms-playwright
+Environment=NODEX_X_PUBLISH_MODE=browser
 EnvironmentFile=/etc/nodex/runtime.env
 ExecStart=/usr/bin/node --import tsx server/index.ts
 Restart=on-failure
