@@ -71,7 +71,7 @@ systemctl list-timers --all certbot.timer
 
 ## Operator access and checks
 
-Open `https://xai.chuhai7.com/operator` in Mac Chrome. Browser headers are an entry filter. The login-code API still requires the registered browser key and administrator password. Enroll on the HTTPS origin because IndexedDB storage is origin-specific.
+Open `https://xai.chuhai7.com/operator` in Mac Chrome. Browser headers are an entry filter. Sign in with the registered browser key and administrator password to open an eight-hour operator session. Sign out from the operator page to end the session. Enroll on the HTTPS origin because IndexedDB storage is origin-specific.
 
 After each release, check `systemctl is-active nodex`, confirm both application ports bind only to `127.0.0.1`, and verify:
 

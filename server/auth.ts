@@ -10,9 +10,11 @@ import { licenseExpiry, type LicenseUnit } from './license-duration.js';
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const REMEMBERED_SESSION_MS = 7 * 24 * 60 * 60 * 1000;
+const OPERATOR_SESSION_MS = 8 * 60 * 60 * 1000;
 const CHALLENGE_MS = 2 * 60 * 1000;
 const FAILURE_WINDOW_MS = 10 * 60 * 1000;
 const SESSION_COOKIE = 'nodex_session';
+const OPERATOR_COOKIE = 'nodex_operator';
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS auth_operator (
@@ -24,6 +26,12 @@ db.exec(`
     hash TEXT PRIMARY KEY,
     expiresAt INTEGER NOT NULL
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS auth_operator_sessions (
+    hash TEXT PRIMARY KEY,
+    credentialHash TEXT NOT NULL,
+    expiresAt INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS auth_operator_session_expiry ON auth_operator_sessions (expiresAt);
   CREATE TABLE IF NOT EXISTS auth_login_codes (
     hash TEXT PRIMARY KEY,
     createdAt INTEGER NOT NULL,
@@ -50,6 +58,15 @@ db.exec(`
     revokedAt INTEGER
   ) STRICT;
   CREATE INDEX IF NOT EXISTS auth_license_creation ON auth_licenses (createdAt DESC, id DESC);
+  CREATE TABLE IF NOT EXISTS auth_license_renewals (
+    requestId TEXT PRIMARY KEY,
+    licenseId TEXT NOT NULL REFERENCES auth_licenses(id),
+    unit TEXT NOT NULL CHECK (unit IN ('days', 'months')),
+    quantity INTEGER NOT NULL,
+    renewedAt INTEGER NOT NULL,
+    previousExpiresAt INTEGER NOT NULL,
+    expiresAt INTEGER NOT NULL
+  ) STRICT;
   CREATE TABLE IF NOT EXISTS auth_rate_limits (
     bucket TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL,
@@ -86,10 +103,10 @@ function cookieOptions(): CookieOptions {
   };
 }
 
-function sessionToken(req: Request): string | undefined {
-  const entries = req.headers.cookie?.split(';').map((part) => part.trim()).filter((part) => part.startsWith(`${SESSION_COOKIE}=`)) ?? [];
+function sessionToken(req: Request, name = SESSION_COOKIE): string | undefined {
+  const entries = req.headers.cookie?.split(';').map((part) => part.trim()).filter((part) => part.startsWith(`${name}=`)) ?? [];
   if (entries.length !== 1) return undefined;
-  const value = entries[0].slice(SESSION_COOKIE.length + 1);
+  const value = entries[0].slice(name.length + 1);
   return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : undefined;
 }
 
@@ -107,6 +124,7 @@ function sessionFor(req: Request): Session | undefined {
 
 function cleanup(now = Date.now()): void {
   db.prepare('DELETE FROM auth_challenges WHERE expiresAt <= ?').run(now);
+  db.prepare('DELETE FROM auth_operator_sessions WHERE expiresAt <= ?').run(now);
   db.prepare('DELETE FROM auth_sessions WHERE expiresAt <= ?').run(now);
   db.prepare('DELETE FROM auth_login_codes WHERE expiresAt <= ?').run(now);
   db.prepare('DELETE FROM auth_rate_limits WHERE resetsAt <= ?').run(now);
@@ -158,8 +176,26 @@ async function passwordMatches(password: string, expected: PasswordHash): Promis
   return timingSafeEqual(derived, expected.key);
 }
 
-function operatorRecord(): { publicKey: string } | undefined {
-  return db.prepare('SELECT publicKey FROM auth_operator WHERE id = 1').get() as { publicKey: string } | undefined;
+type OperatorRecord = { publicKey: string; enrolledAt: number };
+
+function operatorRecord(): OperatorRecord | undefined {
+  return db.prepare('SELECT publicKey, enrolledAt FROM auth_operator WHERE id = 1').get() as OperatorRecord | undefined;
+}
+
+function operatorCredentialHash(enrolled: OperatorRecord, password: PasswordHash): string {
+  return hash(JSON.stringify([enrolled.publicKey, enrolled.enrolledAt, password.salt.toString('hex'), password.key.toString('hex')]));
+}
+
+function operatorCookieOptions(req: Request): CookieOptions {
+  return { path: '/operator/api', httpOnly: true, secure: req.secure, sameSite: 'strict' };
+}
+
+function operatorSessionExpiry(req: Request, enrolled: OperatorRecord | undefined, password: PasswordHash | undefined): number | null {
+  const token = sessionToken(req, OPERATOR_COOKIE);
+  if (!token || !enrolled || !password) return null;
+  const session = db.prepare('SELECT expiresAt FROM auth_operator_sessions WHERE hash = ? AND credentialHash = ? AND expiresAt > ?')
+    .get(hash(`operator-session:${token}`), operatorCredentialHash(enrolled, password), Date.now()) as { expiresAt: number } | undefined;
+  return session?.expiresAt ?? null;
 }
 
 function publicKeyFrom(value: unknown): { key: KeyObject; json: string } {
@@ -195,8 +231,13 @@ operatorAuth.use((req, res, next) => {
   next();
 });
 
-operatorAuth.get('/operator/api/state', (_req, res) => {
-  res.json({ enrolled: Boolean(operatorRecord()), passwordConfigured: Boolean(configuredPassword()) });
+operatorAuth.get('/operator/api/state', (req, res) => {
+  const enrolled = operatorRecord();
+  const password = configuredPassword();
+  res.json({
+    enrolled: Boolean(enrolled), passwordConfigured: Boolean(password),
+    sessionExpiresAt: operatorSessionExpiry(req, enrolled, password),
+  });
 });
 
 operatorAuth.post('/operator/api/enroll', (req, res) => {
@@ -236,10 +277,10 @@ operatorAuth.post('/operator/api/challenge', (req, res) => {
   res.json({ challenge, expiresAt: new Date(expiresAt).toISOString() });
 });
 
-async function verifyOperator(req: Request, res: Response): Promise<void> {
+operatorAuth.post('/operator/api/login', async (req, res) => {
   assertRate(req, res, 'operator-failures', 5);
   const expectedPassword = configuredPassword();
-  if (!expectedPassword) throw new InputError('管理员密码尚未配置，请在本机配置后再生成登录码。', 503);
+  if (!expectedPassword) throw new InputError('管理员密码尚未配置。', 503);
   const enrolled = operatorRecord();
   if (!enrolled) throw new InputError('请先完成本机浏览器绑定。', 409);
   const { password, challenge, signature } = req.body ?? {};
@@ -271,7 +312,29 @@ async function verifyOperator(req: Request, res: Response): Promise<void> {
     throw new InputError('管理员验证暂时不可用，请稍后重试。', 503);
   }
   if (!validPassword) operatorFailure(req);
-}
+
+  const token = randomBytes(32).toString('base64url');
+  const sessionExpiresAt = Date.now() + OPERATOR_SESSION_MS;
+  db.prepare('INSERT INTO auth_operator_sessions (hash, credentialHash, expiresAt) VALUES (?, ?, ?)')
+    .run(hash(`operator-session:${token}`), operatorCredentialHash(enrolled, expectedPassword), sessionExpiresAt);
+  const previous = sessionToken(req, OPERATOR_COOKIE);
+  if (previous) db.prepare('DELETE FROM auth_operator_sessions WHERE hash = ?').run(hash(`operator-session:${previous}`));
+  res.cookie(OPERATOR_COOKIE, token, { ...operatorCookieOptions(req), maxAge: OPERATOR_SESSION_MS });
+  res.json({ enrolled: true, passwordConfigured: true, sessionExpiresAt });
+});
+
+operatorAuth.post('/operator/api/logout', (req, res) => {
+  const token = sessionToken(req, OPERATOR_COOKIE);
+  if (token) db.prepare('DELETE FROM auth_operator_sessions WHERE hash = ?').run(hash(`operator-session:${token}`));
+  res.clearCookie(OPERATOR_COOKIE, operatorCookieOptions(req)).json({ ok: true });
+});
+
+operatorAuth.use('/operator/api', (req, _res, next) => {
+  if (operatorSessionExpiry(req, operatorRecord(), configuredPassword()) === null) {
+    throw new InputError('请先登录管理后台。', 401);
+  }
+  next();
+});
 
 function summarizeLicense(license: License, now = Date.now()) {
   const status = license.revokedAt !== null ? 'revoked'
@@ -280,15 +343,19 @@ function summarizeLicense(license: License, now = Date.now()) {
   return { ...license, status };
 }
 
-operatorAuth.post('/operator/api/codes', async (req, res) => {
-  const { unit, quantity, scope = 'customer', label = '' } = req.body ?? {};
-  if ((unit !== 'days' && unit !== 'months') || !Number.isInteger(quantity) ||
+function requestedDuration(unit: unknown, quantity: unknown): { unit: LicenseUnit; quantity: number } {
+  if ((unit !== 'days' && unit !== 'months') || typeof quantity !== 'number' || !Number.isInteger(quantity) ||
       quantity < 1 || quantity > (unit === 'days' ? 366 : 24)) {
     throw new InputError('请输入有效的授权期：1–366 天或 1–24 个自然月。');
   }
+  return { unit, quantity };
+}
+
+operatorAuth.post('/operator/api/codes', (req, res) => {
+  const { scope = 'customer', label = '' } = req.body ?? {};
+  const { unit, quantity } = requestedDuration(req.body?.unit, req.body?.quantity);
   if (scope !== 'customer' && scope !== 'owner') throw new InputError('请选择有效的工作空间类型。');
   if (typeof label !== 'string' || label.trim().length > 80) throw new InputError('备注不能超过 80 个字符。');
-  await verifyOperator(req, res);
   const id = randomUUID();
   const createdAt = Date.now();
   const code = `NX-${randomBytes(20).toString('base64url')}`;
@@ -306,10 +373,9 @@ operatorAuth.post('/operator/api/codes', async (req, res) => {
   });
 });
 
-operatorAuth.post('/operator/api/licenses/list', async (req, res) => {
+operatorAuth.post('/operator/api/licenses/list', (req, res) => {
   const page = req.body?.page ?? 1;
   if (!Number.isSafeInteger(page) || page < 1) throw new InputError('页码无效。');
-  await verifyOperator(req, res);
   const pageSize = 20;
   const { total } = db.prepare('SELECT COUNT(*) AS total FROM auth_licenses').get() as { total: number };
   const pages = Math.max(1, Math.ceil(total / pageSize));
@@ -322,17 +388,15 @@ operatorAuth.post('/operator/api/licenses/list', async (req, res) => {
   res.json({ rows: licenses.map((license) => summarizeLicense(license, now)), page: currentPage, pages, total });
 });
 
-function requestedLicense(req: Request): string {
-  const id = req.body?.id;
-  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)) {
-    throw new InputError('登录码标识无效。');
+function requestedUuid(value: unknown, error: string): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value)) {
+    throw new InputError(error);
   }
-  return id;
+  return value;
 }
 
-operatorAuth.post('/operator/api/licenses/reveal', async (req, res) => {
-  const id = requestedLicense(req);
-  await verifyOperator(req, res);
+operatorAuth.post('/operator/api/licenses/reveal', (req, res) => {
+  const id = requestedUuid(req.body?.id, '登录码标识无效。');
   const license = db.prepare(`
     SELECT encryptedCode FROM auth_licenses WHERE id = ? AND revokedAt IS NULL AND (expiresAt IS NULL OR expiresAt > ?)
   `).get(id, Date.now()) as { encryptedCode: string } | undefined;
@@ -340,9 +404,50 @@ operatorAuth.post('/operator/api/licenses/reveal', async (req, res) => {
   res.json({ code: reveal(license.encryptedCode) });
 });
 
-operatorAuth.post('/operator/api/licenses/revoke', async (req, res) => {
-  const id = requestedLicense(req);
-  await verifyOperator(req, res);
+operatorAuth.post('/operator/api/licenses/renew', (req, res) => {
+  const id = requestedUuid(req.body?.id, '登录码标识无效。');
+  const requestId = requestedUuid(req.body?.requestId, '续期请求标识无效。');
+  const { unit, quantity } = requestedDuration(req.body?.unit, req.body?.quantity);
+  db.exec('BEGIN IMMEDIATE');
+  let result: ReturnType<typeof summarizeLicense>;
+  try {
+    const license = db.prepare(`
+      SELECT id, suffix, label, scope, unit, quantity, createdAt, activatedAt, expiresAt, revokedAt
+      FROM auth_licenses WHERE id = ?
+    `).get(id) as License | undefined;
+    if (!license) throw new InputError('找不到此登录码。', 404);
+    const existing = db.prepare('SELECT licenseId, unit, quantity FROM auth_license_renewals WHERE requestId = ?')
+      .get(requestId) as { licenseId: string; unit: LicenseUnit; quantity: number } | undefined;
+    const now = Date.now();
+    if (existing) {
+      if (existing.licenseId !== id || existing.unit !== unit || existing.quantity !== quantity) {
+        throw new InputError('此续期请求已提交，请刷新列表后再操作。', 409);
+      }
+      result = summarizeLicense(license, now);
+    } else {
+      if (license.revokedAt !== null) throw new InputError('停用的登录码无法续期。', 409);
+      if (license.activatedAt === null || license.expiresAt === null) {
+        throw new InputError('登录码首次登录后才可续期。', 409);
+      }
+      const expiresAt = licenseExpiry(Math.max(now, license.expiresAt), unit, quantity);
+      db.prepare('UPDATE auth_licenses SET expiresAt = ? WHERE id = ?').run(expiresAt, id);
+      db.prepare(`
+        INSERT INTO auth_license_renewals (requestId, licenseId, unit, quantity, renewedAt, previousExpiresAt, expiresAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(requestId, id, unit, quantity, now, license.expiresAt, expiresAt);
+      db.prepare('UPDATE auth_sessions SET expiresAt = ? WHERE licenseId = ? AND expiresAt > ?').run(expiresAt, id, now);
+      result = summarizeLicense({ ...license, expiresAt }, now);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  res.json({ license: result });
+});
+
+operatorAuth.post('/operator/api/licenses/revoke', (req, res) => {
+  const id = requestedUuid(req.body?.id, '登录码标识无效。');
   const updated = db.prepare('UPDATE auth_licenses SET revokedAt = ? WHERE id = ? AND revokedAt IS NULL')
     .run(Date.now(), id);
   if (!Number(updated.changes)) throw new InputError('登录码不存在或已停用。', 404);

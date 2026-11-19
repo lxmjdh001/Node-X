@@ -8,11 +8,16 @@ import {
   Fingerprint,
   KeyRound,
   LoaderCircle,
+  LogOut,
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
 
-type OperatorState = { enrolled: boolean; passwordConfigured: boolean };
+type OperatorState = {
+  enrolled: boolean;
+  passwordConfigured: boolean;
+  sessionExpiresAt: number | null;
+};
 type BrowserKey = { privateKey: CryptoKey; publicKey: JsonWebKey };
 type LicenseScope = "customer" | "owner";
 type LicenseUnit = "days" | "months";
@@ -51,6 +56,15 @@ const statusLabel = {
   revoked: "已停用",
 };
 
+class OperatorRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function operatorRequest<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/operator/api/${path}`, {
     method: body === undefined ? "GET" : "POST",
@@ -61,7 +75,10 @@ async function operatorRequest<T>(path: string, body?: unknown): Promise<T> {
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok)
-    throw new Error(result.error || `请求失败（${response.status}）`);
+    throw new OperatorRequestError(
+      result.error || `请求失败（${response.status}）`,
+      response.status,
+    );
   return result;
 }
 
@@ -193,12 +210,134 @@ function OperatorButton({
   );
 }
 
+function RenewLicenseDialog({
+  license,
+  onClose,
+  onRenew,
+  busy,
+}: {
+  license: LicenseRecord;
+  onClose: () => void;
+  onRenew: (unit: LicenseUnit, quantity: number) => Promise<void>;
+  busy: boolean;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [unit, setUnit] = useState<LicenseUnit>(license.unit);
+  const [quantity, setQuantity] = useState("1");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const element = dialog.current;
+    const returnFocus = document.activeElement as HTMLElement | null;
+    element?.showModal();
+    return () => {
+      element?.close();
+      returnFocus?.focus({ preventScroll: true });
+    };
+  }, []);
+
+  return (
+    <dialog
+      ref={dialog}
+      className="dialog operator-renew-dialog"
+      aria-labelledby="license-renew-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) onClose();
+      }}
+    >
+      <div className="dialog-head">
+        <div>
+          <h2 id="license-renew-title">续期登录码</h2>
+          <p>
+            NX-••••{license.suffix}
+            {license.label && ` · ${license.label}`}
+          </p>
+        </div>
+      </div>
+      <form
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (busy) return;
+          setError("");
+          try {
+            await onRenew(unit, Number(quantity));
+          } catch (err) {
+            setError((err as Error).message);
+          }
+        }}
+      >
+        <div className="dialog-body">
+          <p className="operator-form-description">
+            {license.expiresAt !== null && license.expiresAt > Date.now()
+              ? `从原到期时间 ${licenseDate.format(license.expiresAt)}（北京时间）起顺延。`
+              : "已到期，从确认续期时开始计算。"}
+          </p>
+          <div className="operator-license-period">
+            <label className="field">
+              <span>续期时长</span>
+              <input
+                type="number"
+                min={1}
+                max={unit === "days" ? 366 : 24}
+                step={1}
+                required
+                autoFocus
+                value={quantity}
+                disabled={busy}
+                onChange={(event) => setQuantity(event.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span id="renew-unit-label">单位</span>
+              <select
+                aria-labelledby="renew-unit-label"
+                value={unit}
+                disabled={busy}
+                onChange={(event) => setUnit(event.target.value as LicenseUnit)}
+              >
+                <option value="days">天</option>
+                <option value="months">自然月</option>
+              </select>
+            </label>
+          </div>
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <div className="dialog-footer">
+          <OperatorButton
+            type="button"
+            className="secondary"
+            onClick={onClose}
+            disabled={busy}
+          >
+            取消
+          </OperatorButton>
+          <OperatorButton type="submit" className="primary" busy={busy}>
+            确认续期
+          </OperatorButton>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
 export default function OperatorApp() {
   const [state, setState] = useState<OperatorState | null>(null);
   const [key, setKey] = useState<BrowserKey | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<
-    "" | "enroll" | "generate" | "list" | "reveal" | "revoke"
+    | ""
+    | "enroll"
+    | "login"
+    | "logout"
+    | "generate"
+    | "list"
+    | "reveal"
+    | "revoke"
+    | "renew"
   >("");
   const [token, setToken] = useState("");
   const [password, setPassword] = useState("");
@@ -211,6 +350,11 @@ export default function OperatorApp() {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [listNotice, setListNotice] = useState("");
+  const [renewal, setRenewal] = useState<{
+    entry: LicenseRecord;
+    requestId: string;
+  } | null>(null);
   const [now, setNow] = useState(Date.now());
   const errorRef = useRef<HTMLParagraphElement>(null);
   const resultRef = useRef<HTMLDivElement>(null);
@@ -254,29 +398,35 @@ export default function OperatorApp() {
     setError((err as Error).message);
     requestAnimationFrame(() => errorRef.current?.focus());
   };
-  const canGenerate =
-    !!state?.enrolled && !!state.passwordConfigured && !!key && !loading;
+  const canSignIn =
+    !!state?.enrolled && state.passwordConfigured && !!key && !loading;
+  const sessionExpiresAt = state?.sessionExpiresAt ?? null;
+  const authenticated = !!key && sessionExpiresAt !== null;
 
-  async function signedRequest<T>(
-    path: string,
-    details: Record<string, unknown>,
-  ) {
-    if (!key || !password) throw new Error("请先输入固定密码。");
-    const { challenge } = await operatorRequest<{ challenge: string }>(
-      "challenge",
-      {},
-    );
-    const signature = await signChallenge(key, challenge);
-    return operatorRequest<T>(path, {
-      ...details,
-      password,
-      challenge,
-      signature,
-    });
+  function endSession() {
+    setState((current) => current && { ...current, sessionExpiresAt: null });
+    setPassword("");
+    setLicenses(null);
+    setCode(null);
+    setRenewal(null);
+    setListNotice("");
+    setNotice("");
+  }
+
+  async function manage<T>(path: string, details: Record<string, unknown>) {
+    try {
+      return await operatorRequest<T>(path, details);
+    } catch (err) {
+      if (err instanceof OperatorRequestError && err.status === 401) {
+        endSession();
+        setError("后台会话已结束，请重新登录。");
+      }
+      throw err;
+    }
   }
 
   const readList = async (page: number) => {
-    const result = await signedRequest<LicensePage>("licenses/list", { page });
+    const result = await manage<LicensePage>("licenses/list", { page });
     setLicenses(result);
     setCode((current) => {
       if (!current) return current;
@@ -291,6 +441,33 @@ export default function OperatorApp() {
     setError("");
     try {
       await readList(page);
+    } catch (err) {
+      fail(err);
+    } finally {
+      setPending("");
+    }
+  };
+  useEffect(() => {
+    if (authenticated) void showList();
+  }, [authenticated]);
+  useEffect(() => {
+    if (!authenticated || sessionExpiresAt === null) return;
+    const timer = window.setTimeout(
+      () => {
+        endSession();
+        setError("后台会话已到期，请重新登录。");
+      },
+      Math.max(0, sessionExpiresAt - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [authenticated, sessionExpiresAt]);
+
+  const logout = async () => {
+    setPending("logout");
+    setError("");
+    try {
+      await operatorRequest("logout", {});
+      endSession();
     } catch (err) {
       fail(err);
     } finally {
@@ -314,13 +491,50 @@ export default function OperatorApp() {
     setPending("reveal");
     setError("");
     try {
-      const { code: existing } = await signedRequest<{ code: string }>(
+      const { code: existing } = await manage<{ code: string }>(
         "licenses/reveal",
         { id: entry.id },
       );
       showCode({ code: existing, license: entry });
     } catch (err) {
       fail(err);
+    } finally {
+      setPending("");
+    }
+  };
+  const renewLicense = async (unit: LicenseUnit, quantity: number) => {
+    if (!renewal) return;
+    setPending("renew");
+    setListNotice("");
+    try {
+      const { license } = await manage<{ license: LicenseRecord }>(
+        "licenses/renew",
+        {
+          id: renewal.entry.id,
+          requestId: renewal.requestId,
+          unit,
+          quantity,
+        },
+      );
+      setLicenses(
+        (current) =>
+          current && {
+            ...current,
+            rows: current.rows.map((row) =>
+              row.id === license.id ? license : row,
+            ),
+          },
+      );
+      setCode((current) =>
+        current?.license.id === license.id ? { ...current, license } : current,
+      );
+      setNow(Date.now());
+      setRenewal(null);
+      if (license.expiresAt !== null) {
+        setListNotice(
+          `已续期，有效至 ${licenseDate.format(license.expiresAt)}（北京时间）。`,
+        );
+      }
     } finally {
       setPending("");
     }
@@ -335,7 +549,7 @@ export default function OperatorApp() {
     setPending("revoke");
     setError("");
     try {
-      await signedRequest("licenses/revoke", { id: entry.id });
+      await manage("licenses/revoke", { id: entry.id });
       if (code?.license.id === entry.id) setCode(null);
       setLicenses(
         (current) =>
@@ -348,7 +562,7 @@ export default function OperatorApp() {
             ),
           },
       );
-      setNotice("登录码已停用。");
+      setListNotice("登录码已停用。");
     } catch (err) {
       fail(err);
     } finally {
@@ -373,18 +587,29 @@ export default function OperatorApp() {
             <KeyRound size={26} strokeWidth={1.7} aria-hidden="true" />
           </span>
           <div>
-            <h1>登录码生成器</h1>
-            <p>在自己的 Mac Chrome 中生成工作空间登录码。</p>
+            <h1>{authenticated ? "登录码管理" : "登录管理后台"}</h1>
           </div>
-          <OperatorButton
-            className="secondary"
-            busy={loading}
-            disabled={!!pending}
-            onClick={() => void load()}
-          >
-            <RefreshCw size={15} aria-hidden="true" />
-            刷新状态
-          </OperatorButton>
+          {authenticated ? (
+            <OperatorButton
+              className="secondary"
+              busy={pending === "logout"}
+              disabled={!!pending}
+              onClick={() => void logout()}
+            >
+              <LogOut size={15} aria-hidden="true" />
+              退出后台
+            </OperatorButton>
+          ) : (
+            <OperatorButton
+              className="secondary"
+              busy={loading}
+              disabled={!!pending}
+              onClick={() => void load()}
+            >
+              <RefreshCw size={15} aria-hidden="true" />
+              刷新状态
+            </OperatorButton>
+          )}
         </div>
         <div className="operator-grid">
           <section className="operator-status-card panel">
@@ -440,7 +665,11 @@ export default function OperatorApp() {
             <div className="operator-section-heading">
               <KeyRound size={20} aria-hidden="true" />
               <h2>
-                {state && !state.enrolled ? "登记此浏览器" : "生成登录码"}
+                {state && !state.enrolled
+                  ? "登记此浏览器"
+                  : authenticated
+                    ? "生成登录码"
+                    : "管理员密码"}
               </h2>
               {state?.enrolled && (
                 <span className="badge green">
@@ -458,7 +687,7 @@ export default function OperatorApp() {
               ) : state && !state.enrolled ? (
                 <>
                   <p className="operator-form-description">
-                    首次使用时，输入终端提供的一次性登记令牌。登记完成后，生成登录码需要使用此
+                    首次使用时，输入终端提供的一次性登记令牌。登记完成后，登录后台需要使用此
                     Chrome 和固定密码。
                   </p>
                   <form
@@ -478,7 +707,7 @@ export default function OperatorApp() {
                         setToken("");
                         await load();
                         setNotice(
-                          "此浏览器已完成登记，可以使用固定密码生成登录码。",
+                          "此浏览器已完成登记，可以使用管理员密码登录。",
                         );
                       } catch (err) {
                         fail(err);
@@ -521,37 +750,38 @@ export default function OperatorApp() {
                     Chrome 个人资料；如果网站数据已清除，需要由管理员重新登记。
                   </p>
                 </div>
-              ) : (
+              ) : !authenticated ? (
                 <>
-                  <p className="operator-form-description">
-                    输入固定密码并选择有效期。新登录码会显示在下方，可复制后提供给使用者。
-                  </p>
                   {state && !state.passwordConfigured && (
                     <div className="form-note">
                       <CircleHelp size={17} aria-hidden="true" />
                       <p>
-                        管理服务尚未配置固定密码。请先在终端完成初始化，再刷新此页面。
+                        管理服务尚未配置密码。请先在终端完成初始化，再刷新此页面。
                       </p>
                     </div>
                   )}
                   <form
                     onSubmit={async (event) => {
                       event.preventDefault();
-                      if (!canGenerate || pending || !key) return;
-                      setPending("generate");
+                      if (!canSignIn || !password || pending || !key) return;
+                      setPending("login");
                       setError("");
                       setNotice("");
                       try {
-                        const result = await signedRequest<LoginCode>("codes", {
-                          unit,
-                          quantity: Number(quantity),
-                          scope,
-                          label,
-                        });
-                        showCode(result);
-                        await readList(1).catch(() =>
-                          setNotice("已生成登录码，可以手动刷新列表。"),
+                        const { challenge } = await operatorRequest<{
+                          challenge: string;
+                        }>("challenge", {});
+                        const signature = await signChallenge(key, challenge);
+                        const result = await operatorRequest<OperatorState>(
+                          "login",
+                          {
+                            password,
+                            challenge,
+                            signature,
+                          },
                         );
+                        setPassword("");
+                        setState(result);
                       } catch (err) {
                         fail(err);
                       } finally {
@@ -560,87 +790,119 @@ export default function OperatorApp() {
                     }}
                   >
                     <label className="field">
-                      <span>固定密码</span>
+                      <span>密码</span>
                       <input
                         autoFocus
                         type="password"
                         autoComplete="current-password"
                         required
                         value={password}
-                        disabled={!canGenerate || !!pending}
-                        placeholder="输入管理员固定密码"
+                        disabled={!canSignIn || !!pending}
                         onChange={(event) => setPassword(event.target.value)}
                       />
                     </label>
-                    <div className="operator-license-period">
-                      <label className="field">
-                        <span>授权期限</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={unit === "days" ? 366 : 24}
-                          step={1}
-                          value={quantity}
-                          required
-                          disabled={!canGenerate || !!pending}
-                          onChange={(event) => setQuantity(event.target.value)}
-                        />
-                      </label>
-                      <label className="field">
-                        <span id="license-unit-label">单位</span>
-                        <select
-                          aria-labelledby="license-unit-label"
-                          value={unit}
-                          disabled={!canGenerate || !!pending}
-                          onChange={(event) => {
-                            setUnit(event.target.value as LicenseUnit);
-                            setQuantity("1");
-                          }}
-                        >
-                          <option value="days">天</option>
-                          <option value="months">自然月</option>
-                        </select>
-                      </label>
-                    </div>
-                    <label className="field">
-                      <span id="license-scope-label">使用范围</span>
-                      <select
-                        aria-labelledby="license-scope-label"
-                        value={scope}
-                        disabled={!canGenerate || !!pending}
-                        onChange={(event) =>
-                          setScope(event.target.value as LicenseScope)
-                        }
-                      >
-                        <option value="customer">独立客户空间</option>
-                        <option value="owner">现有主空间（仅限自己）</option>
-                      </select>
-                    </label>
-                    <label className="field">
-                      <span>备注（选填）</span>
-                      <input
-                        maxLength={80}
-                        value={label}
-                        disabled={!canGenerate || !!pending}
-                        placeholder="例如：客户名称或订单号"
-                        onChange={(event) => setLabel(event.target.value)}
-                      />
-                    </label>
-                    <p className="operator-code-hint">
-                      {scope === "customer"
-                        ? "授权从首次登录开始。客户使用独立空间。"
-                        : "此码可访问现有账号和草稿，仅发给拥有主空间权限的人。"}
-                    </p>
                     <OperatorButton
                       type="submit"
                       className="primary access-submit"
-                      busy={pending === "generate"}
-                      disabled={!canGenerate || !password || !!pending}
+                      busy={pending === "login"}
+                      disabled={!canSignIn || !password || !!pending}
                     >
-                      生成登录码
+                      登录后台
                     </OperatorButton>
                   </form>
                 </>
+              ) : (
+                <form
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    if (pending) return;
+                    setPending("generate");
+                    setError("");
+                    setNotice("");
+                    try {
+                      const result = await manage<LoginCode>("codes", {
+                        unit,
+                        quantity: Number(quantity),
+                        scope,
+                        label,
+                      });
+                      showCode(result);
+                      await readList(1);
+                    } catch (err) {
+                      fail(err);
+                    } finally {
+                      setPending("");
+                    }
+                  }}
+                >
+                  <div className="operator-license-period">
+                    <label className="field">
+                      <span>授权期限</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={unit === "days" ? 366 : 24}
+                        step={1}
+                        value={quantity}
+                        required
+                        disabled={!!pending}
+                        onChange={(event) => setQuantity(event.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span id="license-unit-label">单位</span>
+                      <select
+                        aria-labelledby="license-unit-label"
+                        value={unit}
+                        disabled={!!pending}
+                        onChange={(event) => {
+                          setUnit(event.target.value as LicenseUnit);
+                          setQuantity("1");
+                        }}
+                      >
+                        <option value="days">天</option>
+                        <option value="months">自然月</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label className="field">
+                    <span id="license-scope-label">使用范围</span>
+                    <select
+                      aria-labelledby="license-scope-label"
+                      value={scope}
+                      disabled={!!pending}
+                      onChange={(event) =>
+                        setScope(event.target.value as LicenseScope)
+                      }
+                    >
+                      <option value="customer">独立客户空间</option>
+                      <option value="owner">现有主空间（仅限自己）</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>备注（选填）</span>
+                    <input
+                      maxLength={80}
+                      value={label}
+                      disabled={!!pending}
+                      placeholder="例如：客户名称或订单号"
+                      onChange={(event) => setLabel(event.target.value)}
+                    />
+                  </label>
+                  <p className="operator-code-hint">
+                    {scope === "customer"
+                      ? "授权从首次登录开始。客户使用独立空间。"
+                      : "此码可访问现有账号和草稿，仅发给拥有主空间权限的人。"}
+                  </p>
+                  <OperatorButton
+                    type="submit"
+                    className="primary access-submit"
+                    busy={pending === "generate"}
+                    disabled={!!pending}
+                  >
+                    生成登录码
+                  </OperatorButton>
+                </form>
               )}
               {notice && (
                 <p className="operator-notice" role="status">
@@ -662,7 +924,7 @@ export default function OperatorApp() {
             </div>
           </section>
         </div>
-        {code && (
+        {authenticated && code && (
           <section
             className={`operator-code-card panel ${codeStatus === "expired" ? "expired" : ""}`}
             tabIndex={-1}
@@ -680,7 +942,11 @@ export default function OperatorApp() {
               </div>
               <OperatorButton
                 className="secondary"
-                disabled={!!pending || codeStatus === "expired" || codeStatus === "revoked"}
+                disabled={
+                  !!pending ||
+                  codeStatus === "expired" ||
+                  codeStatus === "revoked"
+                }
                 onClick={async () => {
                   try {
                     await navigator.clipboard.writeText(code.code);
@@ -710,132 +976,168 @@ export default function OperatorApp() {
             </p>
           </section>
         )}
-        <section
-          className="operator-code-card operator-license-list panel"
-          aria-labelledby="license-list-title"
-        >
-          <div className="operator-code-heading">
-            <div>
-              <h2 id="license-list-title">登录码列表</h2>
-              {licenses && <p>{licenses.total} 条 · 北京时间</p>}
-            </div>
-            <OperatorButton
-              type="button"
-              className="secondary"
-              busy={pending === "list"}
-              disabled={!canGenerate || !password || !!pending}
-              onClick={() => void showList(licenses?.page)}
-            >
-              <RefreshCw size={15} aria-hidden="true" />
-              {licenses ? "刷新列表" : "查看列表"}
-            </OperatorButton>
-          </div>
-          {!licenses ? (
-            <p className="operator-code-hint">
-              输入固定密码后可查看登录码列表。
-            </p>
-          ) : licenses.rows.length === 0 ? (
-            <p className="operator-code-hint">暂无按期签发的登录码。</p>
-          ) : (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>登录码 / 备注</th>
-                    <th>范围</th>
-                    <th>授权期</th>
-                    <th>状态</th>
-                    <th>签发时间</th>
-                    <th>首次登录</th>
-                    <th>到期时间</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {licenses.rows.map((entry) => {
-                    const status = statusFor(entry);
-                    const usable = status === "pending" || status === "active";
-                    return (
-                      <tr key={entry.id}>
-                        <td>
-                          <strong>NX-••••{entry.suffix}</strong>
-                          {entry.label && <small>{entry.label}</small>}
-                        </td>
-                        <td>
-                          {entry.scope === "customer"
-                            ? "独立客户空间"
-                            : "现有主空间"}
-                        </td>
-                        <td>{durationLabel(entry)}</td>
-                        <td>
-                          <span className={`operator-license-status ${status}`}>
-                            {statusLabel[status]}
-                          </span>
-                        </td>
-                        <td>{licenseDate.format(entry.createdAt)}</td>
-                        <td>
-                          {entry.activatedAt === null
-                            ? "—"
-                            : licenseDate.format(entry.activatedAt)}
-                        </td>
-                        <td>
-                          {entry.expiresAt === null
-                            ? "—"
-                            : licenseDate.format(entry.expiresAt)}
-                        </td>
-                        <td>
-                          <div className="operator-license-actions">
-                            <button
-                              type="button"
-                              className="text-button"
-                              disabled={!usable || !password || !!pending}
-                              onClick={() => void showHistoryCode(entry)}
-                            >
-                              查看码
-                            </button>
-                            <button
-                              type="button"
-                              className="text-button"
-                              disabled={!usable || !password || !!pending}
-                              onClick={() => void revoke(entry)}
-                            >
-                              停用
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {licenses && licenses.pages > 1 && (
-            <div className="operator-license-pager">
+        {authenticated && (
+          <section
+            className="operator-code-card operator-license-list panel"
+            aria-labelledby="license-list-title"
+          >
+            <div className="operator-code-heading">
+              <div>
+                <h2 id="license-list-title">登录码列表</h2>
+                {licenses && <p>{licenses.total} 条 · 北京时间</p>}
+              </div>
               <OperatorButton
                 type="button"
                 className="secondary"
-                disabled={licenses.page <= 1 || !password || !!pending}
-                onClick={() => void showList(licenses.page - 1)}
+                busy={pending === "list"}
+                disabled={!!pending}
+                onClick={() => void showList(licenses?.page)}
               >
-                上一页
-              </OperatorButton>
-              <span>
-                第 {licenses.page} / {licenses.pages} 页
-              </span>
-              <OperatorButton
-                type="button"
-                className="secondary"
-                disabled={
-                  licenses.page >= licenses.pages || !password || !!pending
-                }
-                onClick={() => void showList(licenses.page + 1)}
-              >
-                下一页
+                <RefreshCw size={15} aria-hidden="true" />
+                刷新列表
               </OperatorButton>
             </div>
-          )}
-        </section>
+            {listNotice && (
+              <p className="operator-notice" role="status">
+                <CheckCircle2 size={16} aria-hidden="true" />
+                {listNotice}
+              </p>
+            )}
+            {!licenses ? (
+              <p className="operator-code-hint">
+                {pending === "list"
+                  ? "正在读取登录码…"
+                  : "刷新列表以读取登录码。"}
+              </p>
+            ) : licenses.rows.length === 0 ? (
+              <p className="operator-code-hint">暂无按期签发的登录码。</p>
+            ) : (
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>登录码 / 备注</th>
+                      <th>范围</th>
+                      <th>首期时长</th>
+                      <th>状态</th>
+                      <th>签发时间</th>
+                      <th>首次登录</th>
+                      <th>到期时间</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {licenses.rows.map((entry) => {
+                      const status = statusFor(entry);
+                      const usable =
+                        status === "pending" || status === "active";
+                      const renewable =
+                        status === "active" || status === "expired";
+                      return (
+                        <tr key={entry.id}>
+                          <td>
+                            <strong>NX-••••{entry.suffix}</strong>
+                            {entry.label && <small>{entry.label}</small>}
+                          </td>
+                          <td>
+                            {entry.scope === "customer"
+                              ? "独立客户空间"
+                              : "现有主空间"}
+                          </td>
+                          <td>{durationLabel(entry)}</td>
+                          <td>
+                            <span
+                              className={`operator-license-status ${status}`}
+                            >
+                              {statusLabel[status]}
+                            </span>
+                          </td>
+                          <td>{licenseDate.format(entry.createdAt)}</td>
+                          <td>
+                            {entry.activatedAt === null
+                              ? "—"
+                              : licenseDate.format(entry.activatedAt)}
+                          </td>
+                          <td>
+                            {entry.expiresAt === null
+                              ? "—"
+                              : licenseDate.format(entry.expiresAt)}
+                          </td>
+                          <td>
+                            <div className="operator-license-actions">
+                              <button
+                                type="button"
+                                className="text-button"
+                                disabled={!usable || !!pending}
+                                onClick={() => void showHistoryCode(entry)}
+                              >
+                                查看码
+                              </button>
+                              {renewable && (
+                                <button
+                                  type="button"
+                                  className="text-button"
+                                  disabled={!!pending}
+                                  onClick={() =>
+                                    setRenewal({
+                                      entry,
+                                      requestId: crypto.randomUUID(),
+                                    })
+                                  }
+                                >
+                                  续期
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="text-button"
+                                disabled={status === "revoked" || !!pending}
+                                onClick={() => void revoke(entry)}
+                              >
+                                停用
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {licenses && licenses.pages > 1 && (
+              <div className="operator-license-pager">
+                <OperatorButton
+                  type="button"
+                  className="secondary"
+                  disabled={licenses.page <= 1 || !!pending}
+                  onClick={() => void showList(licenses.page - 1)}
+                >
+                  上一页
+                </OperatorButton>
+                <span>
+                  第 {licenses.page} / {licenses.pages} 页
+                </span>
+                <OperatorButton
+                  type="button"
+                  className="secondary"
+                  disabled={licenses.page >= licenses.pages || !!pending}
+                  onClick={() => void showList(licenses.page + 1)}
+                >
+                  下一页
+                </OperatorButton>
+              </div>
+            )}
+          </section>
+        )}
+        {authenticated && renewal && (
+          <RenewLicenseDialog
+            license={renewal.entry}
+            busy={pending === "renew"}
+            onClose={() => setRenewal(null)}
+            onRenew={renewLicense}
+          />
+        )}
         <p className="access-footer">
           Node X<span />
           登录码管理工具

@@ -3554,6 +3554,23 @@ td strong {
 .operator-license-list .table-scroll {
   margin-top: 14px;
 }
+.operator-license-list > .operator-notice {
+  margin: 12px 0 0;
+}
+.operator-renew-dialog .dialog-footer {
+  justify-content: flex-end;
+  position: static;
+}
+.operator-renew-dialog .button,
+.operator-license-actions .text-button {
+  min-height: 44px;
+}
+.operator-license-actions .text-button {
+  min-width: 44px;
+}
+.operator-renew-dialog .dialog-body .field {
+  margin-bottom: 0;
+}
 .operator-license-list table {
   min-width: 820px;
 }
