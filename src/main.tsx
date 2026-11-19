@@ -47,6 +47,7 @@ import {
 } from "lucide-react";
 import OperatorApp from "./operator";
 import { BrowserView } from "./browser-view";
+import { parseProxyAddress } from "./proxy-address";
 import "./styles.css";
 
 type Account = {
@@ -3372,6 +3373,161 @@ function WindowFingerprintFields({
   );
 }
 
+function readProxyConnection(form: FormData) {
+  const read = (name: string) => String(form.get(name) ?? "");
+  const address = parseProxyAddress(read("host"));
+  return {
+    host: address?.host ?? read("host").trim(),
+    port: address?.port ?? Number(read("port")),
+    username: address?.username ?? read("username").trim(),
+    password: address?.password ?? read("password"),
+  };
+}
+
+function ProxyConnectionFields({
+  initial,
+  disabled,
+}: {
+  initial?: Proxy;
+  disabled: boolean;
+}) {
+  const [fields, setFields] = useState({
+    host: initial?.host ?? "",
+    port: String(initial?.port ?? 1080),
+    username: initial?.username ?? "",
+    password: "",
+  });
+  const [clearPassword, setClearPassword] = useState(false);
+  const [notice, setNotice] = useState<{
+    text: string;
+    error?: boolean;
+  } | null>(null);
+  const update = (key: keyof typeof fields, value: string) =>
+    setFields((current) => ({ ...current, [key]: value }));
+
+  function recognize(input: HTMLInputElement, text: string) {
+    try {
+      const address = parseProxyAddress(text);
+      if (!address) return false;
+      const { host, port, username, password } = address;
+      setFields((current) => ({
+        host,
+        port: String(port),
+        username: username ?? current.username,
+        password: password ?? current.password,
+      }));
+      if (password) setClearPassword(false);
+      input.setCustomValidity("");
+      setNotice({
+        text: password ? "已识别主机、端口和认证信息。" : "已识别主机和端口。",
+      });
+    } catch (error) {
+      const text = (error as Error).message;
+      input.setCustomValidity(text);
+      setNotice({ text, error: true });
+    }
+    return true;
+  }
+
+  return (
+    <>
+      <div className="form-grid host-grid">
+        <Field
+          label="主机或 IP"
+          hint="可直接粘贴主机:端口:用户名:密码，系统会自动分栏。"
+        >
+          <input
+            name="host"
+            placeholder="proxy.example.com:1080"
+            autoComplete="off"
+            spellCheck={false}
+            value={fields.host}
+            required
+            disabled={disabled}
+            aria-invalid={notice?.error || undefined}
+            onPaste={(event) => {
+              if (
+                recognize(
+                  event.currentTarget,
+                  event.clipboardData.getData("text/plain"),
+                )
+              )
+                event.preventDefault();
+            }}
+            onBlur={(event) =>
+              recognize(event.currentTarget, event.currentTarget.value)
+            }
+            onChange={(event) => {
+              event.currentTarget.setCustomValidity("");
+              setNotice(null);
+              update("host", event.currentTarget.value);
+            }}
+          />
+        </Field>
+        <Field label="端口">
+          <input
+            name="port"
+            type="number"
+            min={1}
+            max={65535}
+            value={fields.port}
+            required
+            disabled={disabled}
+            onChange={(event) => update("port", event.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="form-grid">
+        <Field label="代理用户名（选填）">
+          <input
+            name="username"
+            autoComplete="off"
+            disabled={disabled}
+            value={fields.username}
+            onChange={(event) => update("username", event.target.value)}
+          />
+        </Field>
+        <Field
+          label="代理密码（选填）"
+          hint={initial?.hasPassword ? "留空保留现有密码。" : undefined}
+        >
+          <input
+            name="password"
+            type="password"
+            autoComplete="new-password"
+            disabled={disabled || clearPassword}
+            value={fields.password}
+            onChange={(event) => update("password", event.target.value)}
+          />
+        </Field>
+      </div>
+      {initial?.hasPassword && (
+        <label className="checkbox-field">
+          <input
+            name="clearProxyPassword"
+            type="checkbox"
+            disabled={disabled}
+            checked={clearPassword}
+            onChange={(event) => {
+              setClearPassword(event.target.checked);
+              if (event.target.checked) update("password", "");
+            }}
+          />
+          清除已保存的密码
+        </label>
+      )}
+      {notice && (
+        <p
+          className={notice.error ? "form-error" : "form-note"}
+          role={notice.error ? "alert" : "status"}
+        >
+          {notice.text}
+        </p>
+      )}
+    </>
+  );
+}
+
 function CreateWindowDialog({
   account,
   proxies,
@@ -3404,14 +3560,7 @@ function CreateWindowDialog({
         id,
         label: read("label"),
         accountId: account?.id,
-        proxy: proxyId
-          ? { id: proxyId }
-          : {
-              host: read("host"),
-              port: Number(read("port")),
-              username: read("username"),
-              password: read("password"),
-            },
+        proxy: proxyId ? { id: proxyId } : readProxyConnection(form),
         ...readWindowFingerprint(form),
       })) as { profile: Profile };
       await onCreated(profile);
@@ -3458,49 +3607,7 @@ function CreateWindowDialog({
               </select>
             </Field>
           )}
-          {!proxyId && (
-            <>
-              <div className="form-grid host-grid">
-                <Field label="主机或 IP">
-                  <input
-                    name="host"
-                    maxLength={253}
-                    placeholder="proxy.example.com"
-                    required
-                    disabled={pending}
-                  />
-                </Field>
-                <Field label="端口">
-                  <input
-                    name="port"
-                    type="number"
-                    min={1}
-                    max={65535}
-                    defaultValue={1080}
-                    required
-                    disabled={pending}
-                  />
-                </Field>
-              </div>
-              <div className="form-grid">
-                <Field label="代理用户名（选填）">
-                  <input
-                    name="username"
-                    autoComplete="off"
-                    disabled={pending}
-                  />
-                </Field>
-                <Field label="代理密码（选填）">
-                  <input
-                    name="password"
-                    type="password"
-                    autoComplete="new-password"
-                    disabled={pending}
-                  />
-                </Field>
-              </div>
-            </>
-          )}
+          {!proxyId && <ProxyConnectionFields disabled={pending} />}
           <WindowFingerprintFields
             version={chromiumVersion}
             disabled={pending}
@@ -3540,14 +3647,7 @@ function EntityForm({
     modal.type === "account"
       ? { label: "", username: "", notes: "", ...item }
       : modal.type === "proxy"
-        ? {
-            label: "",
-            host: "",
-            port: 1080,
-            username: "",
-            password: "",
-            ...item,
-          }
+        ? { label: "", ...item }
         : modal.type === "profile"
           ? {
               label: "",
@@ -3567,7 +3667,6 @@ function EntityForm({
   const [values, setValues] = useState<Record<string, any>>(defaults);
   const [error, setError] = useState("");
   const [pending, setPending] = useState("");
-  const [clearPassword, setClearPassword] = useState(false);
   const update = (key: string, value: string) =>
     setValues((v) => ({ ...v, [key]: value }));
   const edit = !!item;
@@ -3594,14 +3693,11 @@ function EntityForm({
           notes: values.notes.trim(),
         };
       else if (modal.type === "proxy") {
-        body = {
-          label: values.label.trim(),
-          host: values.host.trim(),
-          port: Number(values.port),
-          username: values.username.trim(),
-        };
-        if (!edit || values.password || clearPassword)
-          body.password = clearPassword ? "" : values.password;
+        const form = new FormData(event.currentTarget);
+        const { password, ...connection } = readProxyConnection(form);
+        body = { label: values.label.trim(), ...connection };
+        if (!edit || password || form.has("clearProxyPassword"))
+          body.password = password;
       } else if (modal.type === "profile")
         body = {
           label: values.label.trim(),
@@ -3697,73 +3793,10 @@ function EntityForm({
                   onChange={(e) => update("label", e.target.value)}
                 />
               </Field>
-              <div className="form-grid host-grid">
-                <Field
-                  label="SOCKS5 主机"
-                  hint="填写主机或 IP，不包含 socks5://。"
-                >
-                  <input
-                    required
-                    placeholder="127.0.0.1"
-                    value={values.host}
-                    onChange={(e) => update("host", e.target.value)}
-                  />
-                </Field>
-                <Field label="端口">
-                  <input
-                    required
-                    type="number"
-                    min="1"
-                    max="65535"
-                    value={values.port}
-                    onChange={(e) => update("port", e.target.value)}
-                  />
-                </Field>
-              </div>
-              <div className="form-divider">
-                身份认证<span>可选</span>
-              </div>
-              <div className="form-grid">
-                <Field label="用户名">
-                  <input
-                    autoComplete="off"
-                    placeholder="代理用户名"
-                    value={values.username}
-                    onChange={(e) => update("username", e.target.value)}
-                  />
-                </Field>
-                <Field
-                  label="密码"
-                  hint={
-                    edit && (item as Proxy).hasPassword
-                      ? "留空保留现有密码"
-                      : undefined
-                  }
-                >
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    placeholder={
-                      edit && (item as Proxy).hasPassword
-                        ? "已设置密码"
-                        : "代理密码"
-                    }
-                    value={values.password}
-                    disabled={clearPassword}
-                    onChange={(e) => update("password", e.target.value)}
-                  />
-                </Field>
-              </div>
-              {edit && (item as Proxy).hasPassword && (
-                <label className="checkbox-field">
-                  <input
-                    type="checkbox"
-                    checked={clearPassword}
-                    onChange={(e) => setClearPassword(e.target.checked)}
-                  />
-                  清除已保存的密码
-                </label>
-              )}
+              <ProxyConnectionFields
+                initial={modal.item}
+                disabled={!!pending}
+              />
               <div className="form-note">
                 <Icon icon={Network} size={17} />
                 <p>保存后可进行连接检查，验证实际出口 IP 和延迟。</p>
