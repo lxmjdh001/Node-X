@@ -3961,13 +3961,6 @@ function AuthGate() {
               </Button>
             </form>
           )}
-          <div className="access-help">
-            <Icon icon={CircleHelp} size={15} />
-            <p>
-              没有登录码时，请向管理员获取。登录码生成器由管理员在自己的 Mac
-              Chrome 中使用。
-            </p>
-          </div>
         </section>
         <p className="access-footer">
           Node X<span />

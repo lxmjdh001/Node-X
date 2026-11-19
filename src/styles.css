@@ -3152,20 +3152,6 @@ td strong {
   margin-bottom: 20px;
   font-size: 12px;
 }
-.access-help {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  margin-top: 29px;
-  padding-top: 21px;
-  border-top: 1px solid #ebeff5;
-  color: #758298;
-  font-size: 11px;
-  line-height: 1.9;
-}
-.access-help svg {
-  margin-top: 3px;
-}
 .access-loading {
   display: flex;
   align-items: center;
@@ -3434,9 +3420,6 @@ td strong {
   }
   .access-card .field > span:first-child {
     font-size: 12px;
-  }
-  .access-help {
-    font-size: 11px;
   }
   .topbar-right {
     gap: 8px;
