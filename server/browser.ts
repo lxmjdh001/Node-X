@@ -359,7 +359,7 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
         },
         // HTTP(S)/WebSocket traffic uses the authenticated bridge. Prevent direct UDP transports.
         args: ['--disable-quic', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-          ...(remote ? ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost'] : [])],
+          ...(remote ? ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1'] : [])],
         timeout: 30_000,
       });
       const version = context.browser()?.version();
