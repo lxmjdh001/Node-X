@@ -1,0 +1,42 @@
+{
+  "name": "node-x",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "tsx watch server/index.ts --dev",
+    "start": "tsx server/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "browser:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.93",
+    "ai": "^7.0.177",
+    "csv-parse": "^7.0.3",
+    "express": "^5.3.0",
+    "lucide-react": "^1.76.0",
+    "playwright": "^1.65.1",
+    "proxy-chain": "^3.0.3",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "socks-proxy-agent": "^10.1.0",
+    "tsx": "^4.23.15",
+    "twitter-api-v2": "^1.31.0",
+    "twitter-text": "^3.1.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/twitter-text": "^3.1.10",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.8"
+  }
+}
