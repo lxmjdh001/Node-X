@@ -37,6 +37,7 @@ import {
   Send,
   Settings2,
   ShieldCheck,
+  Shuffle,
   Sparkles,
   Square,
   Trash2,
@@ -47,6 +48,12 @@ import {
 } from "lucide-react";
 import OperatorApp from "./operator";
 import { BrowserView } from "./browser-view";
+import {
+  browserLanguages,
+  browserRegions,
+  browserTimezones,
+  randomBrowserRegion,
+} from "./browser-region";
 import { parseProxyAddress } from "./proxy-address";
 import "./styles.css";
 
@@ -3257,6 +3264,72 @@ function readWindowFingerprint(form: FormData) {
   };
 }
 
+const timezoneOptions = browserTimezones.map((value) => ({
+  value,
+  label: value,
+}));
+const customRegionValue = "__custom__";
+
+function RegionalSettingField({
+  label,
+  name,
+  value,
+  options,
+  custom,
+  disabled,
+  onChange,
+  onCustom,
+}: {
+  label: string;
+  name: "locale" | "timezone";
+  value: string;
+  options: readonly { value: string; label: string }[];
+  custom: boolean;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onCustom: (enabled: boolean) => void;
+}) {
+  return (
+    <div>
+      <Field label={label}>
+        <select
+          name={custom ? undefined : name}
+          aria-label={label}
+          value={custom ? customRegionValue : value}
+          disabled={disabled}
+          onChange={(event) => {
+            const next = event.target.value;
+            onCustom(next === customRegionValue);
+            if (next !== customRegionValue) onChange(next);
+          }}
+        >
+          {!custom && !options.some((option) => option.value === value) && (
+            <option value={value}>{value}</option>
+          )}
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+          <option value={customRegionValue}>自定义…</option>
+        </select>
+      </Field>
+      {custom && (
+        <Field label={`自定义${label}`}>
+          <input
+            name={name}
+            value={value}
+            maxLength={name === "locale" ? 30 : 80}
+            disabled={disabled}
+            onChange={(event) => onChange(event.target.value)}
+            required
+          />
+        </Field>
+      )}
+    </div>
+  );
+}
+
 function WindowFingerprintFields({
   profile,
   version,
@@ -3266,51 +3339,81 @@ function WindowFingerprintFields({
   version?: string | null;
   disabled: boolean;
 }) {
+  const [region, setRegion] = useState("");
+  const [settings, setSettings] = useState({
+    locale: profile?.locale || "zh-CN",
+    timezone: profile?.timezone || "Asia/Shanghai",
+  });
+  const [custom, setCustom] = useState({ locale: false, timezone: false });
+  const [announcement, setAnnouncement] = useState("");
+
+  const updateRegionValue = (name: keyof typeof settings, value: string) =>
+    setSettings((previous) => ({ ...previous, [name]: value }));
+
   return (
     <>
       <h3 className="form-divider">
         浏览器指纹{version && <span>Chromium {version}</span>}
       </h3>
+      <div className="window-region-control">
+        <Field label="随机国家或地区">
+          <select
+            aria-label="随机国家或地区"
+            value={region}
+            onChange={(event) => setRegion(event.target.value)}
+            disabled={disabled}
+          >
+            <option value="">不限地区</option>
+            {browserRegions.map(({ code, label }) => (
+              <option key={code} value={code}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Button
+          type="button"
+          variant="secondary"
+          icon={Shuffle}
+          disabled={disabled}
+          onClick={() => {
+            const next = randomBrowserRegion(region, settings);
+            setSettings(next);
+            setCustom({ locale: false, timezone: false });
+            setAnnouncement(`已随机填入 ${next.locale} 和 ${next.timezone}。`);
+          }}
+        >
+          随机填入
+        </Button>
+      </div>
+      <span className="sr-only" aria-live="polite">
+        {announcement}
+      </span>
       <div className="form-grid">
-        <Field label="浏览器语言">
-          <input
-            name="locale"
-            defaultValue={profile?.locale || "zh-CN"}
-            list="window-languages"
-            maxLength={30}
-            required
-            disabled={disabled}
-          />
-          <datalist id="window-languages">
-            {["zh-CN", "zh-TW", "en-US", "en-GB", "ja-JP"].map((value) => (
-              <option value={value} key={value} />
-            ))}
-          </datalist>
-        </Field>
-        <Field label="时区">
-          <input
-            name="timezone"
-            defaultValue={profile?.timezone || "Asia/Shanghai"}
-            list="window-timezones"
-            maxLength={80}
-            required
-            disabled={disabled}
-          />
-          <datalist id="window-timezones">
-            {[
-              "Asia/Shanghai",
-              "Asia/Hong_Kong",
-              "Asia/Tokyo",
-              "Asia/Singapore",
-              "America/New_York",
-              "America/Los_Angeles",
-              "Europe/London",
-              "UTC",
-            ].map((value) => (
-              <option value={value} key={value} />
-            ))}
-          </datalist>
-        </Field>
+        <RegionalSettingField
+          label="浏览器语言"
+          name="locale"
+          value={settings.locale}
+          options={browserLanguages}
+          custom={custom.locale}
+          disabled={disabled}
+          onChange={(value) => updateRegionValue("locale", value)}
+          onCustom={(enabled) =>
+            setCustom((previous) => ({ ...previous, locale: enabled }))
+          }
+        />
+        <RegionalSettingField
+          label="时区"
+          name="timezone"
+          value={settings.timezone}
+          options={timezoneOptions}
+          custom={custom.timezone}
+          disabled={disabled}
+          onChange={(value) => updateRegionValue("timezone", value)}
+          onCustom={(enabled) =>
+            setCustom((previous) => ({ ...previous, timezone: enabled }))
+          }
+        />
         <Field label="窗口宽度">
           <input
             name="width"

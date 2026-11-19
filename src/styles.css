@@ -3745,6 +3745,23 @@ td strong {
 .create-window-fingerprint select {
   padding-inline: 8px 4px;
 }
+.window-region-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.window-region-control .field {
+  margin-bottom: 0;
+}
+.window-region-control .button {
+  min-height: 39px;
+  white-space: nowrap;
+}
+.create-window-fingerprint .window-region-control .button {
+  min-height: 36px;
+}
 .create-window-layout .form-divider {
   margin: 0 0 10px;
   padding: 0;
@@ -3781,17 +3798,18 @@ td strong {
     grid-template-columns: repeat(6, minmax(0, 1fr));
     column-gap: 10px;
   }
-  .create-window-fingerprint .field {
+  .create-window-fingerprint .form-grid > * {
     grid-column: span 3;
   }
-  .create-window-fingerprint .field:nth-child(n + 5) {
+  .create-window-fingerprint .form-grid > :nth-child(n + 5) {
     grid-column: span 2;
   }
 }
 
 @media (pointer: coarse) {
   .create-window-layout :is(input, select),
-  .create-window-dialog .dialog-footer .button {
+  .create-window-dialog .dialog-footer .button,
+  .create-window-fingerprint .window-region-control .button {
     min-height: 44px;
   }
 }
