@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -35,10 +36,31 @@ export function reveal(value: string): string {
   return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString('utf8');
 }
 
-const databasePath = resolve(dataDirectory, 'nodex.sqlite');
-export const db = new DatabaseSync(databasePath);
-chmodSync(databasePath, 0o600);
-db.exec(`
+const workspace = new AsyncLocalStorage<string>();
+const customers = new Map<string, DatabaseSync>();
+const MAX_OPEN_DATABASES = 32;
+
+export function isCustomerWorkspace(): boolean {
+  return workspace.getStore() !== undefined;
+}
+
+export function runInWorkspace<T>(customerId: string | undefined, action: () => T): T {
+  return customerId ? workspace.run(customerId, action) : action();
+}
+
+export function workspaceDirectory(): string {
+  const id = workspace.getStore();
+  if (!id) return dataDirectory;
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)) throw new Error('Invalid workspace ID');
+  return resolve(dataDirectory, 'customers', id);
+}
+
+function openDatabase(directory: string): DatabaseSync {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const databasePath = resolve(directory, 'nodex.sqlite');
+  const db = new DatabaseSync(databasePath);
+  chmodSync(databasePath, 0o600);
+  db.exec(`
   PRAGMA foreign_keys = ON;
   PRAGMA journal_mode = WAL;
   PRAGMA busy_timeout = 3000;
@@ -97,15 +119,46 @@ db.exec(`
   ) STRICT;
   CREATE INDEX IF NOT EXISTS due_drafts ON drafts (status, scheduledAt);
 `);
+  return db;
+}
+
+export const db = openDatabase(dataDirectory);
+
+export function workspaceDb(): DatabaseSync {
+  const id = workspace.getStore();
+  if (!id) return db;
+  const cached = customers.get(id);
+  if (cached) {
+    customers.delete(id);
+    customers.set(id, cached);
+    return cached;
+  }
+  if (customers.size >= MAX_OPEN_DATABASES) {
+    const oldest = customers.keys().next().value;
+    if (oldest) {
+      customers.get(oldest)?.close();
+      customers.delete(oldest);
+    }
+  }
+  const database = openDatabase(workspaceDirectory());
+  customers.set(id, database);
+  return database;
+}
+
+export function closeDatabases(): void {
+  for (const database of customers.values()) database.close();
+  customers.clear();
+  db.close();
+}
 
 export function row<T>(sql: string, ...args: SQLInputValue[]): T | undefined {
-  return db.prepare(sql).get(...args) as T | undefined;
+  return workspaceDb().prepare(sql).get(...args) as T | undefined;
 }
 
 export function rows<T>(sql: string, ...args: SQLInputValue[]): T[] {
-  return db.prepare(sql).all(...args) as T[];
+  return workspaceDb().prepare(sql).all(...args) as T[];
 }
 
 export function write(sql: string, ...args: SQLInputValue[]): number {
-  return Number(db.prepare(sql).run(...args).changes);
+  return Number(workspaceDb().prepare(sql).run(...args).changes);
 }

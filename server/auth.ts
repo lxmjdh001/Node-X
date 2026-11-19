@@ -1,11 +1,12 @@
 import {
-  createHash, createPublicKey, randomBytes, scrypt, timingSafeEqual, verify,
+  createHash, createPublicKey, randomBytes, randomUUID, scrypt, timingSafeEqual, verify,
   type KeyObject,
 } from 'node:crypto';
 import { isIP } from 'node:net';
 import { Router, type CookieOptions, type Request, type RequestHandler, type Response } from 'express';
 import { InputError } from './errors.js';
-import { db } from './store.js';
+import { db, reveal, runInWorkspace, seal } from './store.js';
+import { licenseExpiry, type LicenseUnit } from './license-duration.js';
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const REMEMBERED_SESSION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -34,6 +35,21 @@ db.exec(`
     createdAt INTEGER NOT NULL,
     expiresAt INTEGER NOT NULL
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS auth_licenses (
+    id TEXT PRIMARY KEY,
+    codeHash TEXT NOT NULL UNIQUE,
+    encryptedCode TEXT NOT NULL,
+    suffix TEXT NOT NULL,
+    label TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('owner', 'customer')),
+    unit TEXT NOT NULL CHECK (unit IN ('days', 'months')),
+    quantity INTEGER NOT NULL,
+    createdAt INTEGER NOT NULL,
+    activatedAt INTEGER,
+    expiresAt INTEGER,
+    revokedAt INTEGER
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS auth_license_creation ON auth_licenses (createdAt DESC, id DESC);
   CREATE TABLE IF NOT EXISTS auth_rate_limits (
     bucket TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL,
@@ -43,7 +59,18 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS auth_session_expiry ON auth_sessions (expiresAt);
 `);
 
-type Session = { expiresAt: number };
+if (!db.prepare('PRAGMA table_info(auth_sessions)').all().some((column) => column.name === 'licenseId')) {
+  db.exec('ALTER TABLE auth_sessions ADD COLUMN licenseId TEXT REFERENCES auth_licenses(id)');
+}
+db.exec('CREATE INDEX IF NOT EXISTS auth_session_license ON auth_sessions (licenseId)');
+
+type Scope = 'owner' | 'customer';
+type Session = { expiresAt: number; licenseId: string | null; scope: Scope | null; licenseExpiresAt: number | null };
+type License = {
+  id: string; suffix: string; label: string; scope: Scope; unit: LicenseUnit;
+  quantity: number; createdAt: number; activatedAt: number | null;
+  expiresAt: number | null; revokedAt: number | null;
+};
 type PasswordHash = { salt: Buffer; key: Buffer };
 
 function hash(value: string): string {
@@ -69,8 +96,13 @@ function sessionToken(req: Request): string | undefined {
 function sessionFor(req: Request): Session | undefined {
   const token = sessionToken(req);
   if (!token) return undefined;
-  return db.prepare('SELECT expiresAt FROM auth_sessions WHERE hash = ? AND expiresAt > ?')
-    .get(hash(`session:${token}`), Date.now()) as Session | undefined;
+  const now = Date.now();
+  return db.prepare(`
+    SELECT s.expiresAt, s.licenseId, l.scope, l.expiresAt AS licenseExpiresAt
+    FROM auth_sessions s LEFT JOIN auth_licenses l ON l.id = s.licenseId
+    WHERE s.hash = ? AND s.expiresAt > ? AND
+      (s.licenseId IS NULL OR (l.expiresAt > ? AND l.revokedAt IS NULL))
+  `).get(hash(`session:${token}`), now, now) as Session | undefined;
 }
 
 function cleanup(now = Date.now()): void {
@@ -204,16 +236,13 @@ operatorAuth.post('/operator/api/challenge', (req, res) => {
   res.json({ challenge, expiresAt: new Date(expiresAt).toISOString() });
 });
 
-operatorAuth.post('/operator/api/codes', async (req, res) => {
+async function verifyOperator(req: Request, res: Response): Promise<void> {
   assertRate(req, res, 'operator-failures', 5);
   const expectedPassword = configuredPassword();
   if (!expectedPassword) throw new InputError('管理员密码尚未配置，请在本机配置后再生成登录码。', 503);
   const enrolled = operatorRecord();
   if (!enrolled) throw new InputError('请先完成本机浏览器绑定。', 409);
-  const { password, challenge, signature, ttlMinutes = 15 } = req.body ?? {};
-  if (!Number.isInteger(ttlMinutes) || ttlMinutes < 1 || ttlMinutes > 60) {
-    throw new InputError('登录码有效期必须为 1–60 分钟的整数。');
-  }
+  const { password, challenge, signature } = req.body ?? {};
   if (typeof password !== 'string' || password.length < 1 || password.length > 1024 ||
       typeof challenge !== 'string' || !/^nodex-operator-v1\.[A-Za-z0-9_-]{43}$/.test(challenge) ||
       typeof signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(signature)) {
@@ -242,14 +271,83 @@ operatorAuth.post('/operator/api/codes', async (req, res) => {
     throw new InputError('管理员验证暂时不可用，请稍后重试。', 503);
   }
   if (!validPassword) operatorFailure(req);
-  const now = Date.now();
-  const expiresAt = now + ttlMinutes * 60_000;
+}
+
+function summarizeLicense(license: License, now = Date.now()) {
+  const status = license.revokedAt !== null ? 'revoked'
+    : license.activatedAt === null ? 'pending'
+    : license.expiresAt !== null && license.expiresAt <= now ? 'expired' : 'active';
+  return { ...license, status };
+}
+
+operatorAuth.post('/operator/api/codes', async (req, res) => {
+  const { unit, quantity, scope = 'customer', label = '' } = req.body ?? {};
+  if ((unit !== 'days' && unit !== 'months') || !Number.isInteger(quantity) ||
+      quantity < 1 || quantity > (unit === 'days' ? 366 : 24)) {
+    throw new InputError('请输入有效的授权期：1–366 天或 1–24 个自然月。');
+  }
+  if (scope !== 'customer' && scope !== 'owner') throw new InputError('请选择有效的工作空间类型。');
+  if (typeof label !== 'string' || label.trim().length > 80) throw new InputError('备注不能超过 80 个字符。');
+  await verifyOperator(req, res);
+  const id = randomUUID();
+  const createdAt = Date.now();
   const code = `NX-${randomBytes(20).toString('base64url')}`;
-  db.prepare('INSERT INTO auth_login_codes (hash, createdAt, expiresAt) VALUES (?, ?, ?)')
-    .run(hash(`code:${code}`), now, expiresAt);
-  // This is the only response containing the newly generated code. It is never
-  // stored plaintext, logged, or included in list/status endpoints.
-  res.status(201).json({ code, expiresAt: new Date(expiresAt).toISOString() });
+  const suffix = code.slice(-4);
+  db.prepare(`
+    INSERT INTO auth_licenses (id, codeHash, encryptedCode, suffix, label, scope, unit, quantity, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, hash(`code:${code}`), seal(code), suffix, label.trim(), scope, unit, quantity, createdAt);
+  res.status(201).json({
+    code,
+    license: summarizeLicense({
+      id, suffix, createdAt, label: label.trim(), scope, unit, quantity,
+      activatedAt: null, expiresAt: null, revokedAt: null,
+    }),
+  });
+});
+
+operatorAuth.post('/operator/api/licenses/list', async (req, res) => {
+  const page = req.body?.page ?? 1;
+  if (!Number.isSafeInteger(page) || page < 1) throw new InputError('页码无效。');
+  await verifyOperator(req, res);
+  const pageSize = 20;
+  const { total } = db.prepare('SELECT COUNT(*) AS total FROM auth_licenses').get() as { total: number };
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(page, pages);
+  const licenses = db.prepare(`
+    SELECT id, suffix, label, scope, unit, quantity, createdAt, activatedAt, expiresAt, revokedAt
+    FROM auth_licenses ORDER BY createdAt DESC, id DESC LIMIT ? OFFSET ?
+  `).all(pageSize, (currentPage - 1) * pageSize) as License[];
+  const now = Date.now();
+  res.json({ rows: licenses.map((license) => summarizeLicense(license, now)), page: currentPage, pages, total });
+});
+
+function requestedLicense(req: Request): string {
+  const id = req.body?.id;
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)) {
+    throw new InputError('登录码标识无效。');
+  }
+  return id;
+}
+
+operatorAuth.post('/operator/api/licenses/reveal', async (req, res) => {
+  const id = requestedLicense(req);
+  await verifyOperator(req, res);
+  const license = db.prepare(`
+    SELECT encryptedCode FROM auth_licenses WHERE id = ? AND revokedAt IS NULL AND (expiresAt IS NULL OR expiresAt > ?)
+  `).get(id, Date.now()) as { encryptedCode: string } | undefined;
+  if (!license) throw new InputError('登录码已到期或已停用。', 404);
+  res.json({ code: reveal(license.encryptedCode) });
+});
+
+operatorAuth.post('/operator/api/licenses/revoke', async (req, res) => {
+  const id = requestedLicense(req);
+  await verifyOperator(req, res);
+  const updated = db.prepare('UPDATE auth_licenses SET revokedAt = ? WHERE id = ? AND revokedAt IS NULL')
+    .run(Date.now(), id);
+  if (!Number(updated.changes)) throw new InputError('登录码不存在或已停用。', 404);
+  db.prepare('DELETE FROM auth_sessions WHERE licenseId = ?').run(id);
+  res.json({ ok: true });
 });
 
 /** Mount under /api before requireAuth. Only these three routes are public. */
@@ -258,7 +356,11 @@ auth.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); })
 
 auth.get('/auth/status', (req, res) => {
   const session = sessionFor(req);
-  res.json(session ? { authenticated: true, expiresAt: new Date(session.expiresAt).toISOString() } : { authenticated: false });
+  res.json(session ? {
+    authenticated: true,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+    licenseExpiresAt: session.licenseExpiresAt === null ? null : new Date(session.licenseExpiresAt).toISOString(),
+  } : { authenticated: false });
 });
 
 auth.post('/auth/login', (req, res) => {
@@ -268,25 +370,40 @@ auth.post('/auth/login', (req, res) => {
   const code = typeof submitted === 'string' ? submitted.trim() : '';
   if (!/^NX-[A-Za-z0-9_-]{27}$/.test(code)) {
     countAttempt(req, 'login-failures');
-    throw new InputError('登录码无效、已使用或已过期。', 401);
+    throw new InputError('登录码无效、已使用、已停用或已过期。', 401);
   }
   const now = Date.now();
   const token = randomBytes(32).toString('base64url');
   const remember = req.body?.remember === true;
   const duration = remember ? REMEMBERED_SESSION_MS : SESSION_MS;
-  const expiresAt = now + duration;
+  let expiresAt = now + duration;
+  let licenseId: string | null = null;
   let accepted = false;
   db.exec('BEGIN IMMEDIATE');
   try {
-    const consumed = db.prepare(`UPDATE auth_login_codes SET usedAt = ?
-      WHERE hash = ? AND usedAt IS NULL AND expiresAt > ? RETURNING hash`)
-      .get(now, hash(`code:${code}`), now);
-    if (consumed) {
-      db.prepare('INSERT INTO auth_sessions (hash, createdAt, expiresAt) VALUES (?, ?, ?)')
-        .run(hash(`session:${token}`), now, expiresAt);
+    const codeHash = hash(`code:${code}`);
+    const license = db.prepare(`
+      SELECT id, unit, quantity, activatedAt, expiresAt, revokedAt FROM auth_licenses WHERE codeHash = ?
+    `).get(codeHash) as Pick<License, 'id' | 'unit' | 'quantity' | 'activatedAt' | 'expiresAt' | 'revokedAt'> | undefined;
+    if (license && license.revokedAt === null) {
+      if (license.activatedAt === null) {
+        expiresAt = licenseExpiry(now, license.unit, license.quantity);
+        db.prepare('UPDATE auth_licenses SET activatedAt = ?, expiresAt = ? WHERE id = ?').run(now, expiresAt, license.id);
+        licenseId = license.id;
+      } else if (license.expiresAt !== null && license.expiresAt > now) {
+        expiresAt = license.expiresAt;
+        licenseId = license.id;
+      }
+      accepted = licenseId !== null;
+    } else if (!license) {
+      accepted = Boolean(db.prepare(`UPDATE auth_login_codes SET usedAt = ?
+        WHERE hash = ? AND usedAt IS NULL AND expiresAt > ? RETURNING hash`).get(now, codeHash, now));
+    }
+    if (accepted) {
+      db.prepare('INSERT INTO auth_sessions (hash, createdAt, expiresAt, licenseId) VALUES (?, ?, ?, ?)')
+        .run(hash(`session:${token}`), now, expiresAt, licenseId);
       const previous = sessionToken(req);
       if (previous) db.prepare('DELETE FROM auth_sessions WHERE hash = ?').run(hash(`session:${previous}`));
-      accepted = true;
     }
     db.exec('COMMIT');
   } catch {
@@ -295,11 +412,11 @@ auth.post('/auth/login', (req, res) => {
   }
   if (!accepted) {
     countAttempt(req, 'login-failures');
-    throw new InputError('登录码无效、已使用或已过期。', 401);
+    throw new InputError('登录码无效、已使用、已停用或已过期。', 401);
   }
   res.cookie(SESSION_COOKIE, token, {
     ...cookieOptions(),
-    ...(remember ? { maxAge: duration } : {}),
+    ...(remember ? { maxAge: expiresAt - now } : {}),
   });
   res.json({ ok: true, authenticated: true, expiresAt: new Date(expiresAt).toISOString() });
 });
@@ -313,9 +430,14 @@ auth.post('/auth/logout', (req, res) => {
 
 /** Fail closed: every business API route needs a valid, unexpired session. */
 export const requireAuth: RequestHandler = (req, res, next) => {
-  if (!sessionFor(req)) {
-    res.set('Cache-Control', 'no-store').status(401).json({ error: '请先使用单次登录码登录。', code: 'AUTH_REQUIRED' });
+  const session = sessionFor(req);
+  if (!session) {
+    res.set('Cache-Control', 'no-store').status(401).json({ error: '请先使用登录码登录。', code: 'AUTH_REQUIRED' });
     return;
   }
-  next();
+  if (session.scope === 'customer' && !session.licenseId) {
+    res.set('Cache-Control', 'no-store').status(401).json({ error: '客户空间授权无效。', code: 'AUTH_REQUIRED' });
+    return;
+  }
+  runInWorkspace(session.scope === 'customer' ? session.licenseId! : undefined, next);
 };

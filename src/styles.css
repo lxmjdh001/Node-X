@@ -3545,3 +3545,49 @@ td strong {
     letter-spacing: 1.2px;
   }
 }
+
+.operator-license-period {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.operator-license-list .table-scroll {
+  margin-top: 14px;
+}
+.operator-license-list table {
+  min-width: 820px;
+}
+.operator-license-list td small {
+  display: block;
+  margin-top: 3px;
+  color: #64738a;
+}
+.operator-license-actions,
+.operator-license-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.operator-license-actions {
+  white-space: nowrap;
+}
+.operator-license-pager {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.operator-license-status {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: #eef2f8;
+  color: #425672;
+  white-space: nowrap;
+}
+.operator-license-status.active {
+  background: #e5f4ec;
+  color: #1f6944;
+}
+.operator-license-status.revoked {
+  background: #f9eceb;
+  color: #8c3930;
+}

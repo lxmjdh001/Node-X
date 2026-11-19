@@ -101,6 +101,7 @@ type Workspace = {
   drafts: Draft[];
   settings: { aiConfigured: boolean; xConfigured: boolean };
   chromium?: { installed: boolean; version: string | null };
+  workspaceScope?: "owner" | "customer";
   version: string;
 };
 type ImportFormat = "nodex" | "camoufox";
@@ -380,7 +381,13 @@ function Field({
   );
 }
 
-function App({ onLogout }: { onLogout: () => Promise<void> }) {
+function App({
+  onLogout,
+  accessExpiresAt,
+}: {
+  onLogout: () => Promise<void>;
+  accessExpiresAt: string | null;
+}) {
   const initialPage = window.location.hash.slice(1) as Page;
   const [page, setPage] = useState<Page>(
     [...nav.map((n) => n.id), "settings"].includes(initialPage)
@@ -388,6 +395,7 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
       : "overview",
   );
   const [data, setData] = useState<Workspace>(blank);
+  const customer = data.workspaceScope === "customer";
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
   const [modal, setModal] = useState<EntityModal | null>(null);
@@ -431,8 +439,9 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
     }
   };
   useEffect(() => {
-    if (page === "profiles") void refreshCamoufox();
-  }, [page]);
+    if (page === "profiles" && data.workspaceScope === "owner")
+      void refreshCamoufox();
+  }, [page, data.workspaceScope]);
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => {
@@ -735,7 +744,7 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
             <Monitor size={16} />
           </span>
           <div>
-            <strong>本地工作空间</strong>
+            <strong>{customer ? "独立客户空间" : "主工作空间"}</strong>
             <small>个人控制台</small>
           </div>
         </div>
@@ -801,7 +810,9 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
           <div className="topbar-right">
             <span className="local-pill">
               <span />
-              本地部署
+              {accessExpiresAt
+                ? `授权至 ${new Date(accessExpiresAt).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" })}`
+                : "本地部署"}
             </span>
             <IconButton
               icon={busy === "refresh" ? LoaderCircle : RefreshCw}
@@ -839,7 +850,7 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
               <p>{pageInfo[1]}</p>
             </div>
             <div className="heading-action">
-              {page === "profiles" && (
+              {page === "profiles" && !customer && (
                 <Button
                   icon={Fingerprint}
                   onClick={() => {
@@ -1242,6 +1253,7 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
                                       <Button
                                         variant="ghost"
                                         icon={RefreshCw}
+                                        disabled={customer}
                                         busy={busy === `check-${proxy.id}`}
                                         onClick={() =>
                                           run(
@@ -1291,87 +1303,94 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
               )}
               {page === "profiles" && (
                 <>
-                  <div className="engine-grid">
-                    <section className="engine-panel">
-                      <span className="info-banner-icon">
-                        <Icon icon={Monitor} size={21} />
-                      </span>
-                      <div className="engine-copy">
-                        <h2>
-                          本地 Chromium
-                          <Badge
-                            tone={
-                              data.chromium?.installed ? "green" : "neutral"
-                            }
-                          >
-                            {data.chromium?.installed ? "已安装" : "未安装"}
-                          </Badge>
-                        </h2>
-                        <p>
-                          {data.chromium?.installed
-                            ? `真实版本 ${data.chromium.version || "待读取"}。每个账号使用独立目录保存会话。`
-                            : "安装 Playwright 浏览器后，即可打开下方配置的独立环境。"}
-                        </p>
-                        {!data.chromium?.installed && (
-                          <code className="engine-command">
-                            npm run browser:install
-                          </code>
-                        )}
-                      </div>
-                    </section>
-                    <section className="engine-panel">
-                      <span className="info-banner-icon">
-                        <Icon icon={Fingerprint} size={21} />
-                      </span>
-                      <div className="engine-copy">
-                        <h2>
-                          Camoufox Profile Manager
-                          <Badge
-                            tone={
-                              camoufoxError
-                                ? "red"
-                                : camoufox?.status.ready
-                                  ? "green"
-                                  : "neutral"
-                            }
-                          >
-                            {camoufoxLoading
-                              ? "检查中"
-                              : camoufoxError
-                                ? "连接异常"
-                                : camoufox?.status.ready
-                                  ? "已就绪"
-                                  : camoufox?.status.configured
-                                    ? "未就绪"
-                                    : "未配置"}
-                          </Badge>
-                        </h2>
-                        <p>
-                          {camoufoxError ||
-                            camoufox?.status.message ||
-                            "配置 Manager 端口后，可批量创建环境或关联已有会话。"}
-                        </p>
-                        {camoufox?.status.version && (
+                  {customer ? (
+                    <div className="inline-notice standalone">
+                      <Icon icon={CircleHelp} size={16} />
+                      客户空间可保存配置。共享浏览器和代理检测在主空间执行。
+                    </div>
+                  ) : (
+                    <div className="engine-grid">
+                      <section className="engine-panel">
+                        <span className="info-banner-icon">
+                          <Icon icon={Monitor} size={21} />
+                        </span>
+                        <div className="engine-copy">
+                          <h2>
+                            本地 Chromium
+                            <Badge
+                              tone={
+                                data.chromium?.installed ? "green" : "neutral"
+                              }
+                            >
+                              {data.chromium?.installed ? "已安装" : "未安装"}
+                            </Badge>
+                          </h2>
                           <p>
-                            已安装引擎 {camoufox.status.version} · 最低主版本{" "}
-                            {camoufox.status.minimumMajor}
+                            {data.chromium?.installed
+                              ? `真实版本 ${data.chromium.version || "待读取"}。每个账号使用独立目录保存会话。`
+                              : "安装 Playwright 浏览器后，即可打开下方配置的独立环境。"}
                           </p>
-                        )}
-                        <button
-                          className="text-button"
-                          disabled={camoufoxLoading}
-                          onClick={() => void refreshCamoufox()}
-                        >
-                          <Icon
-                            icon={camoufoxLoading ? LoaderCircle : RefreshCw}
-                            size={13}
-                            className={camoufoxLoading ? "spin" : ""}
-                          />
-                          刷新状态
-                        </button>
-                      </div>
-                    </section>
-                  </div>
+                          {!data.chromium?.installed && (
+                            <code className="engine-command">
+                              npm run browser:install
+                            </code>
+                          )}
+                        </div>
+                      </section>
+                      <section className="engine-panel">
+                        <span className="info-banner-icon">
+                          <Icon icon={Fingerprint} size={21} />
+                        </span>
+                        <div className="engine-copy">
+                          <h2>
+                            Camoufox Profile Manager
+                            <Badge
+                              tone={
+                                camoufoxError
+                                  ? "red"
+                                  : camoufox?.status.ready
+                                    ? "green"
+                                    : "neutral"
+                              }
+                            >
+                              {camoufoxLoading
+                                ? "检查中"
+                                : camoufoxError
+                                  ? "连接异常"
+                                  : camoufox?.status.ready
+                                    ? "已就绪"
+                                    : camoufox?.status.configured
+                                      ? "未就绪"
+                                      : "未配置"}
+                            </Badge>
+                          </h2>
+                          <p>
+                            {camoufoxError ||
+                              camoufox?.status.message ||
+                              "配置 Manager 端口后，可批量创建环境或关联已有会话。"}
+                          </p>
+                          {camoufox?.status.version && (
+                            <p>
+                              已安装引擎 {camoufox.status.version} · 最低主版本{" "}
+                              {camoufox.status.minimumMajor}
+                            </p>
+                          )}
+                          <button
+                            className="text-button"
+                            disabled={camoufoxLoading}
+                            onClick={() => void refreshCamoufox()}
+                          >
+                            <Icon
+                              icon={camoufoxLoading ? LoaderCircle : RefreshCw}
+                              size={13}
+                              className={camoufoxLoading ? "spin" : ""}
+                            />
+                            刷新状态
+                          </button>
+                        </div>
+                      </section>
+                    </div>
+                  )}
                   {(!data.accounts.length || !data.proxies.length) && (
                     <div className="inline-notice standalone">
                       <Icon icon={CircleHelp} size={16} />
@@ -1411,7 +1430,11 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
                       <Empty
                         icon={Fingerprint}
                         title="为账号创建独立环境"
-                        description="关联账号和代理后，即可打开浏览器并人工登录 X。"
+                        description={
+                          customer
+                            ? "关联账号和代理以保存环境配置。"
+                            : "关联账号和代理后，即可打开浏览器并人工登录 X。"
+                        }
                         action={addButton(
                           "profile",
                           "创建环境",
@@ -1488,6 +1511,7 @@ function App({ onLogout }: { onLogout: () => Promise<void> }) {
                                             : "primary"
                                         }
                                         busy={busy === profile.id}
+                                        disabled={customer}
                                         onClick={() =>
                                           run(
                                             profile.id,
@@ -3786,7 +3810,9 @@ const loginHistoryDate = new Intl.DateTimeFormat("zh-CN", {
 
 function loadLoginHistory(): LoginHistoryEntry[] {
   try {
-    const data: unknown = JSON.parse(localStorage.getItem(loginHistoryKey) || "[]");
+    const data: unknown = JSON.parse(
+      localStorage.getItem(loginHistoryKey) || "[]",
+    );
     if (!Array.isArray(data)) return [];
     return data
       .filter(
@@ -3808,7 +3834,8 @@ function loadLoginHistory(): LoginHistoryEntry[] {
 
 function saveLoginHistory(history: LoginHistoryEntry[]): void {
   try {
-    if (history.length) localStorage.setItem(loginHistoryKey, JSON.stringify(history));
+    if (history.length)
+      localStorage.setItem(loginHistoryKey, JSON.stringify(history));
     else localStorage.removeItem(loginHistoryKey);
   } catch {
     // Browsers can block local storage. The sign-in session still works.
@@ -3822,6 +3849,7 @@ function AuthGate() {
   const [error, setError] = useState("");
   const [code, setCode] = useState("");
   const [remember, setRemember] = useState(false);
+  const [accessExpiresAt, setAccessExpiresAt] = useState<string | null>(null);
   const [loginHistory, setLoginHistory] = useState(loadLoginHistory);
   const [historyIndex, setHistoryIndex] = useState("");
   const [pending, setPending] = useState(false);
@@ -3841,6 +3869,11 @@ function AuthGate() {
         throw new Error(result.error || "无法检查登录状态，请重试。");
       if (current === sequence.current) {
         setState(result.authenticated ? "authenticated" : "anonymous");
+        setAccessExpiresAt(
+          typeof result.licenseExpiresAt === "string"
+            ? result.licenseExpiresAt
+            : null,
+        );
         setError("");
       }
     } catch (err) {
@@ -3860,7 +3893,7 @@ function AuthGate() {
       sequence.current++;
       setState("anonymous");
       setCode("");
-      setError("登录已过期，请输入新的登录码。");
+      setError("登录已过期，请重新输入有效的登录码。");
       setChecking(false);
     };
     const visible = () => {
@@ -3894,7 +3927,8 @@ function AuthGate() {
     setCode("");
     setError("");
   };
-  if (state === "authenticated") return <App onLogout={logout} />;
+  if (state === "authenticated")
+    return <App onLogout={logout} accessExpiresAt={accessExpiresAt} />;
   return (
     <div className="access-shell">
       <header className="access-header">
@@ -3996,7 +4030,7 @@ function AuthGate() {
                   disabled={pending}
                   onChange={(event) => setRemember(event.target.checked)}
                 />
-                <span>在此浏览器记住登录（7 天）</span>
+                <span>在此浏览器记住登录</span>
               </label>
               {error && (
                 <p
@@ -4028,10 +4062,15 @@ function AuthGate() {
                     onChange={(event) => setHistoryIndex(event.target.value)}
                   >
                     <option value="">
-                      {loginHistory.length ? "选择一条历史记录" : "暂无历史记录"}
+                      {loginHistory.length
+                        ? "选择一条历史记录"
+                        : "暂无历史记录"}
                     </option>
                     {loginHistory.map(({ suffix, usedAt }, index) => (
-                      <option key={`${usedAt}-${suffix}-${index}`} value={index}>
+                      <option
+                        key={`${usedAt}-${suffix}-${index}`}
+                        value={index}
+                      >
                         NX-••••{suffix} · {loginHistoryDate.format(usedAt)}
                       </option>
                     ))}
@@ -4041,8 +4080,8 @@ function AuthGate() {
                   <div className="access-history-actions">
                     <span aria-live="polite">
                       {historyIndex === ""
-                        ? "仅保留已使用登录码的末四位。"
-                        : "这枚登录码已使用，请输入新码。"}
+                        ? "仅保留登录码末四位和登录时间。"
+                        : "请输入完整登录码，授权期内可以重新登录。"}
                     </span>
                     <button
                       className="text-button"

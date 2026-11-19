@@ -12,7 +12,7 @@ import { editor } from './editor.js';
 import { InputError } from './errors.js';
 import { imports } from './imports.js';
 import { recoverPublishQueue, runPublishQueue, waitForPublisher } from './publisher.js';
-import { db } from './store.js';
+import { closeDatabases, isCustomerWorkspace } from './store.js';
 import { workspace } from './workspace.js';
 
 function readPort(value: string | number, name: string) {
@@ -95,6 +95,20 @@ app.use('/api', sameOrigin((host) => external?.origin || `http://${host}`, true)
 app.use('/api/auth', express.json({ limit: '8kb' }));
 app.use('/api', auth);
 app.use('/api', requireAuth);
+// Customer sessions may manage records in their own database. Shared execution
+// services (browser, network checks, model and X credentials) remain owner-only.
+const customerRoutes: Partial<Record<string, RegExp>> = {
+  GET: /^\/workspace\/?$/i,
+  POST: /^\/(?:accounts|proxies|profiles|drafts|import\/(?:preview|commit))\/?$/i,
+  PATCH: /^\/(?:accounts|proxies|profiles|drafts)\/[^/]+\/?$/i,
+  DELETE: /^\/(?:accounts|proxies|profiles|drafts)\/[^/]+\/?$/i,
+};
+app.use('/api', (req, _res, next) => {
+  if (isCustomerWorkspace() && !customerRoutes[req.method]?.test(req.path)) {
+    throw new InputError('此功能需要独立执行节点，当前客户空间暂未开放。', 403);
+  }
+  next();
+});
 app.use('/api/import', express.json({ limit: '1200kb' }), imports);
 app.use('/api/camoufox', express.json({ limit: '32kb' }), camoufox);
 app.use('/api', express.json({ limit: '32kb' }), workspace, editor, (_req, res) => {
@@ -194,7 +208,7 @@ async function shutdown() {
   watchdog.unref();
   await Promise.allSettled([closePreview?.(), shutdownBrowsers(), ...drained]);
   await waitForPublisher();
-  db.close();
+  closeDatabases();
   clearTimeout(watchdog);
   process.exit(0);
 }

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { InputError } from './errors.js';
 import { parseImportCsv, type ImportCandidate } from './import-csv.js';
-import { db, reveal, row, rows } from './store.js';
+import { reveal, row, rows, workspaceDb } from './store.js';
 import {
   accountInput, checkProxyCredentials, createAccount, createProfile, createProxy, profileInput, proxyInput,
 } from './workspace.js';
@@ -126,6 +126,7 @@ imports.post('/preview', (req, res) => {
 
 imports.post('/commit', (req, res) => {
   const input = importInput.parse(req.body);
+  const db = workspaceDb();
   db.exec('BEGIN IMMEDIATE');
   let result;
   try {

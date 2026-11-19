@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { browserVersion, checkProxy, chromiumInfo, startBrowser, stopBrowser } from './browser.js';
 import { contentStatus } from './content.js';
 import { InputError, requireFound } from './errors.js';
-import { dataDirectory, reveal, row, rows, seal, write } from './store.js';
+import { isCustomerWorkspace, workspaceDirectory, reveal, row, rows, seal, write } from './store.js';
 
 export const workspace = Router();
 const checkingProxies = new Set<string>();
@@ -103,7 +103,8 @@ function ensureProfileFree(id: string, allowRunning = false) {
 }
 
 workspace.get('/workspace', async (_req, res) => {
-  const chromium = await chromiumInfo();
+  const customer = isCustomerWorkspace();
+  const chromium = customer ? { installed: false, version: null } : await chromiumInfo();
   const accounts = rows<Account>('SELECT * FROM accounts ORDER BY createdAt DESC').map(({ token, xUserId: _id, ...account }) => ({
     ...account, xConnected: Boolean(token),
   }));
@@ -116,7 +117,8 @@ workspace.get('/workspace', async (_req, res) => {
   });
   res.json({
     accounts, proxies, profiles, drafts: rows('SELECT * FROM drafts ORDER BY createdAt DESC'),
-    settings: contentStatus(), chromium, version: '0.1.0',
+    settings: customer ? { aiConfigured: false, xConfigured: false } : contentStatus(),
+    workspaceScope: customer ? 'customer' : 'owner', chromium, version: '0.1.0',
   });
 });
 
@@ -231,7 +233,7 @@ workspace.delete('/profiles/:id', async (req, res) => {
   if (!z.uuid().safeParse(id).success) throw new InputError('浏览器环境标识无效。');
   busyProfiles.add(id);
   try {
-    await rm(resolve(dataDirectory, 'profiles', id), { recursive: true, force: true });
+    await rm(resolve(workspaceDirectory(), 'profiles', id), { recursive: true, force: true });
     write('DELETE FROM profiles WHERE id = ?', id);
     res.json(ok);
   } finally {
