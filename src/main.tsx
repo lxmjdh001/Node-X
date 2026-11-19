@@ -3333,7 +3333,7 @@ function WindowFingerprintFields({
             disabled={disabled}
           />
         </Field>
-        <Field label="显示比例" hint="网页的设备像素比，范围 1–3 倍。">
+        <Field label="显示比例" hint="设备像素比，1–3 倍。">
           <input
             name="deviceScaleFactor"
             type="number"
@@ -3574,50 +3574,55 @@ function CreateWindowDialog({
     <Dialog
       title="新建窗口"
       description="设置代理和指纹后，直接打开 X 登录页。"
+      className="create-window-dialog"
       onClose={() => {
         if (!pending) onClose();
       }}
     >
-      <form onSubmit={submit}>
-        <div className="dialog-body">
-          <Field label="窗口名称（选填）">
-            <input
-              name="label"
-              maxLength={80}
-              defaultValue={account?.label}
-              placeholder="自动命名"
+      <form className="create-window-form" onSubmit={submit}>
+        <div className="dialog-body create-window-layout">
+          <div className="create-window-network">
+            <Field label="窗口名称（选填）">
+              <input
+                name="label"
+                maxLength={80}
+                defaultValue={account?.label}
+                placeholder="自动命名"
+                disabled={pending}
+              />
+            </Field>
+            <h3 className="form-divider">SOCKS5 代理</h3>
+            {proxies.length > 0 && (
+              <Field label="选择代理">
+                <select
+                  aria-label="选择代理"
+                  value={proxyId}
+                  onChange={(event) => setProxyId(event.target.value)}
+                  disabled={pending}
+                >
+                  {proxies.map((proxy) => (
+                    <option key={proxy.id} value={proxy.id}>
+                      {proxy.label} · {proxy.host}:{proxy.port}
+                    </option>
+                  ))}
+                  <option value="">添加新代理</option>
+                </select>
+              </Field>
+            )}
+            {!proxyId && <ProxyConnectionFields disabled={pending} />}
+          </div>
+          <div className="create-window-fingerprint">
+            <WindowFingerprintFields
+              version={chromiumVersion}
               disabled={pending}
             />
-          </Field>
-          <h3 className="form-divider">SOCKS5 代理</h3>
-          {proxies.length > 0 && (
-            <Field label="选择代理">
-              <select
-                aria-label="选择代理"
-                value={proxyId}
-                onChange={(event) => setProxyId(event.target.value)}
-                disabled={pending}
-              >
-                {proxies.map((proxy) => (
-                  <option key={proxy.id} value={proxy.id}>
-                    {proxy.label} · {proxy.host}:{proxy.port}
-                  </option>
-                ))}
-                <option value="">添加新代理</option>
-              </select>
-            </Field>
-          )}
-          {!proxyId && <ProxyConnectionFields disabled={pending} />}
-          <WindowFingerprintFields
-            version={chromiumVersion}
-            disabled={pending}
-          />
-          {error && (
-            <p className="form-error" role="alert">
-              {error}
-            </p>
-          )}
+          </div>
         </div>
+        {error && (
+          <p className="form-error create-window-error" role="alert">
+            {error}
+          </p>
+        )}
         <div className="dialog-footer">
           <Button type="button" disabled={pending} onClick={onClose}>
             取消
