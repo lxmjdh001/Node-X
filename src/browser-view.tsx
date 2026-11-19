@@ -199,6 +199,13 @@ export function BrowserView({
         >
           <House size={16} aria-hidden="true" /> X 首页
         </button>
+        <button
+          className="button secondary"
+          disabled={!available}
+          onClick={() => send({ type: "login" })}
+        >
+          X 登录
+        </button>
         <button className="button secondary" onClick={onStop}>
           关闭浏览器
         </button>

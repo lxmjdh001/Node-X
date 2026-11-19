@@ -9,7 +9,7 @@ import { managerPort } from './camoufox-client.js';
 import { contentStatus } from './content.js';
 import { InputError, requireFound } from './errors.js';
 import { publicProxy } from './public-proxy.js';
-import { isCustomerWorkspace, workspaceDirectory, workspaceId, reveal, row, rows, seal, write } from './store.js';
+import { isCustomerWorkspace, workspaceDb, workspaceDirectory, workspaceId, reveal, row, rows, seal, write } from './store.js';
 
 export const workspace = Router();
 const checkingProxies = new Set<string>();
@@ -24,7 +24,7 @@ const browserInput = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string().min(1).max(8000) }),
   z.object({ type: z.literal('key'), key: z.enum(['Backspace', 'Delete', 'Enter', 'Tab', 'Shift+Tab', 'Escape', 'Space',
     'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Control+a']) }),
-  z.object({ type: z.enum(['back', 'reload', 'home']) }),
+  z.object({ type: z.enum(['back', 'reload', 'home', 'login']) }),
 ]);
 
 export type Account = {
@@ -76,6 +76,15 @@ export const profileInput = z.object({
   width: z.number().int().min(320).max(3840),
   height: z.number().int().min(320).max(2160),
 });
+const windowInput = profileInput.omit({ label: true, accountId: true, proxyId: true }).extend({
+  id: z.uuid(),
+  label: z.string().trim().max(80).default(''),
+  accountId: z.uuid().optional(),
+  proxy: z.union([
+    z.object({ id: z.uuid() }).strict(),
+    proxyInput.omit({ label: true }).strict(),
+  ]),
+});
 
 export function checkProxyCredentials(username: string, password: string) {
   if (Boolean(username) !== Boolean(password)) throw new InputError('使用账号密码认证时，请同时填写代理用户名和密码。');
@@ -96,9 +105,14 @@ export function createProxy(data: z.output<typeof proxyInput>): string {
   return id;
 }
 
-export function createProfile(data: z.output<typeof profileInput>): void {
+export function createProfile(data: z.output<typeof profileInput>, id: string = randomUUID()): void {
   write('INSERT INTO profiles (id, accountId, proxyId, label, locale, timezone, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    randomUUID(), data.accountId, data.proxyId, data.label, data.locale, data.timezone, data.width, data.height);
+    id, data.accountId, data.proxyId, data.label, data.locale, data.timezone, data.width, data.height);
+}
+
+function profileStatus(profile: Profile) {
+  const version = browserVersion(profile.id);
+  return { ...profile, running: Boolean(version), version };
 }
 
 function ensureProxyFree(id: string) {
@@ -123,16 +137,43 @@ workspace.get('/workspace', async (_req, res) => {
   const proxies = rows<Proxy>('SELECT * FROM proxies ORDER BY rowid DESC').map(({ password, ...proxy }) => ({
     ...proxy, hasPassword: Boolean(password),
   }));
-  const profiles = rows<Profile>('SELECT * FROM profiles ORDER BY rowid DESC').map((profile) => {
-    const version = browserVersion(profile.id);
-    return { ...profile, running: Boolean(version), version };
-  });
+  const profiles = rows<Profile>('SELECT * FROM profiles ORDER BY rowid DESC').map(profileStatus);
   res.json({
     accounts, proxies, profiles, drafts: rows('SELECT * FROM drafts ORDER BY createdAt DESC'),
     settings: contentStatus(),
     workspaceScope: customer ? 'customer' : 'owner', chromium, remoteBrowser: remoteBrowser(),
     camoufoxConfigured: managerPort() !== null, version: '0.1.0',
   });
+});
+
+workspace.post('/windows', (req, res) => {
+  const input = windowInput.parse(req.body);
+  const database = workspaceDb();
+  database.exec('BEGIN IMMEDIATE');
+  let profile: Profile;
+  try {
+    const saved = row<Profile>('SELECT * FROM profiles WHERE id = ?', input.id);
+    if (saved) {
+      profile = saved;
+    } else {
+      const account = input.accountId ? accountById(input.accountId) : undefined;
+      if (account && row('SELECT 1 FROM profiles WHERE accountId = ?', account.id)) {
+        throw new InputError('此账号已有浏览器窗口，请从列表打开。', 409);
+      }
+      const name = input.label || account?.label || `窗口 ${input.id.slice(0, 4).toUpperCase()}`;
+      const proxyId = 'id' in input.proxy
+        ? proxyById(input.proxy.id).id
+        : createProxy({ ...input.proxy, label: `SOCKS5 ${input.proxy.host}:${input.proxy.port}`.slice(0, 80) });
+      const accountId = account?.id ?? createAccount({ label: name, username: '', notes: '' });
+      createProfile({ ...input, label: name, accountId, proxyId }, input.id);
+      profile = profileById(input.id);
+    }
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+  res.status(201).json({ profile: profileStatus(profile) });
 });
 
 workspace.post('/accounts', (req, res) => {

@@ -45,6 +45,8 @@ type BrowserSession = {
 type BrowserProxy = { port: number; close: () => Promise<void> };
 
 const IP_CHECK_URL = 'https://api.ipify.org?format=json';
+const X_LOGIN_URL = 'https://x.com/i/flow/login';
+const X_HOME_URL = 'https://x.com/home';
 const PROXY_TIMEOUT_MS = 15_000;
 const MAX_CHECK_BYTES = 4096;
 const UUID_PATTERN = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -329,8 +331,6 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
     let context: BrowserContext | undefined;
     try {
       const proxy = remote ? await publicProxy(profile.proxy) : profile.proxy;
-      // The same validated upstream is used for both the test and the browser.
-      await checkProxy(proxy);
       if (shuttingDown || !workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
       bridge = await createBridge(proxy, username, password, remote);
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -358,6 +358,11 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
       });
       const version = context.browser()?.version();
       if (!version) throw new Error('无法读取实际浏览器版本。');
+      const sessionCookies = await context.cookies(X_HOME_URL);
+      const page = context.pages()[0] ?? await context.newPage();
+      await page.goto(sessionCookies.some(({ name, value }) => name === 'auth_token' && value) ? X_HOME_URL : X_LOGIN_URL,
+        { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      if (!workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
       const session: BrowserSession = { context, bridge, version, workspaceId: customerId, remote, lastUse: Date.now(), inputPending: false };
       sessions.set(key, session);
       remoteStarting.delete(key);
@@ -365,9 +370,6 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
         if (sessions.get(key) === session) sessions.delete(key);
         void session.bridge.close().catch(() => undefined);
       });
-      const page = context.pages()[0] ?? await context.newPage();
-      await page.goto('https://x.com/', { waitUntil: 'domcontentloaded', timeout: 45_000 });
-      if (!workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
       await page.bringToFront();
       return { version };
     } catch (error) {
@@ -429,7 +431,7 @@ export type BrowserInput =
   | { type: 'scroll'; x: number; y: number; delta: number }
   | { type: 'text'; text: string }
   | { type: 'key'; key: string }
-  | { type: 'back' | 'reload' | 'home' };
+  | { type: 'back' | 'reload' | 'home' | 'login' };
 
 export async function sendBrowserInput(id: string, input: BrowserInput): Promise<void> {
   const { session, page } = viewingSession(id);
@@ -451,7 +453,8 @@ export async function sendBrowserInput(id: string, input: BrowserInput): Promise
       const options = { waitUntil: 'domcontentloaded' as const, timeout: 15_000 };
       if (input.type === 'back') await page.goBack(options);
       if (input.type === 'reload') await page.reload(options);
-      if (input.type === 'home') await page.goto('https://x.com/', options);
+      if (input.type === 'home') await page.goto(X_HOME_URL, options);
+      if (input.type === 'login') await page.goto(X_LOGIN_URL, options);
     }
   } catch {
     throw new InputError('浏览器未完成此操作，请重试。', 502);

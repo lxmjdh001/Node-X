@@ -156,9 +156,9 @@ type CamoufoxResult = {
 type Page =
   "overview" | "accounts" | "proxies" | "profiles" | "drafts" | "settings";
 type EntityModal =
-  | { type: "account"; item?: Account }
+  | { type: "account"; item: Account }
   | { type: "proxy"; item?: Proxy }
-  | { type: "profile"; item?: Profile }
+  | { type: "profile"; item: Profile }
   | { type: "draft"; item?: Draft };
 type Confirmation = {
   title: string;
@@ -408,6 +408,9 @@ function App({
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
   const [modal, setModal] = useState<EntityModal | null>(null);
+  const [windowCreator, setWindowCreator] = useState<{
+    account?: Account;
+  } | null>(null);
   const [importing, setImporting] = useState(false);
   const [camoufoxOpen, setCamoufoxOpen] = useState(false);
   const [camoufox, setCamoufox] = useState<CamoufoxData | null>(null);
@@ -604,7 +607,7 @@ function App({
       },
     });
   const addButton = (
-    type: EntityModal["type"],
+    type: "proxy" | "draft",
     label: string,
     disabled = false,
   ) => (
@@ -612,9 +615,14 @@ function App({
       variant="primary"
       icon={Plus}
       disabled={disabled}
-      onClick={() => setModal({ type } as EntityModal)}
+      onClick={() => setModal({ type })}
     >
       {label}
+    </Button>
+  );
+  const newWindowButton = (
+    <Button icon={Plus} variant="primary" onClick={() => setWindowCreator({})}>
+      新建窗口
     </Button>
   );
   const readyProxy = data.proxies.filter((p) => p.status === "ok").length;
@@ -627,7 +635,7 @@ function App({
   );
   const pageInfo = {
     overview: ["工作概览", "每个账号，都有清晰的工作环境。"],
-    accounts: ["账号管理", "管理你的 X 账号、授权状态与关联环境。"],
+    accounts: ["账号管理", "在独立窗口登录并管理你的 X 账号。"],
     proxies: ["代理网络", "配置 SOCKS5 出口，并检查连接状态。"],
     profiles: ["浏览器环境", "为每个账号绑定独立的浏览器数据与代理。"],
     drafts: ["内容工作室", "从想法到草稿，再由你确认发布。"],
@@ -638,13 +646,13 @@ function App({
     if (!list.length)
       return (
         <Empty
-          title={query ? "没有找到这个账号" : "添加第一个 X 账号"}
+          title={query ? "没有找到这个账号" : "新建第一个 X 窗口"}
           description={
             query
               ? "试试账号名称或用户名。"
-              : "先建立账号记录，再为它配置代理和浏览器环境。"
+              : "设置代理和指纹后，在窗口里直接登录 X。"
           }
-          action={!query && addButton("account", "添加账号")}
+          action={!query && newWindowButton}
         />
       );
     return (
@@ -674,11 +682,9 @@ function App({
                       </span>
                       <div>
                         <strong>{account.label}</strong>
-                        <small>
-                          {account.username
-                            ? `@${account.username.replace(/^@/, "")}`
-                            : "尚未填写用户名"}
-                        </small>
+                        {account.username && (
+                          <small>@{account.username.replace(/^@/, "")}</small>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -701,11 +707,10 @@ function App({
                       <button
                         className="text-button muted"
                         onClick={() => {
-                          go("profiles");
-                          setModal({ type: "profile" });
+                          setWindowCreator({ account });
                         }}
                       >
-                        待配置
+                        新建窗口
                         <Icon icon={ArrowUpRight} size={13} />
                       </button>
                     )}
@@ -946,19 +951,13 @@ function App({
                   批量导入
                 </Button>
               )}
-              {page === "overview" || page === "accounts"
-                ? addButton("account", "添加账号")
+              {page === "overview" || page === "accounts" || page === "profiles"
+                ? newWindowButton
                 : page === "proxies"
                   ? addButton("proxy", "添加代理")
-                  : page === "profiles"
-                    ? addButton(
-                        "profile",
-                        "创建环境",
-                        !data.accounts.length || !data.proxies.length,
-                      )
-                    : page === "drafts"
-                      ? addButton("draft", "新建内容", !data.accounts.length)
-                      : null}
+                  : page === "drafts"
+                    ? addButton("draft", "新建内容", !data.accounts.length)
+                    : null}
             </div>
           </div>
           {fetchError && (
@@ -1473,33 +1472,11 @@ function App({
                       </section>
                     )}
                   </div>
-                  {(!data.accounts.length || !data.proxies.length) && (
-                    <div className="inline-notice standalone">
-                      <Icon icon={CircleHelp} size={16} />
-                      <span>
-                        创建环境前，请先添加
-                        {!data.accounts.length ? "账号" : ""}
-                        {!data.accounts.length && !data.proxies.length
-                          ? "和"
-                          : ""}
-                        {!data.proxies.length ? " SOCKS5 代理" : ""}。
-                      </span>
-                      <button
-                        className="text-button"
-                        onClick={() =>
-                          go(!data.accounts.length ? "accounts" : "proxies")
-                        }
-                      >
-                        前往配置
-                        <Icon icon={ArrowRight} size={14} />
-                      </button>
-                    </div>
-                  )}
                   <section className="panel">
                     <div className="table-toolbar">
                       <div className="tabs">
                         <span className="tab active">
-                          本地 Chromium 环境<span>{data.profiles.length}</span>
+                          Chromium 窗口<span>{data.profiles.length}</span>
                         </span>
                       </div>
                       <SearchBox
@@ -1511,13 +1488,9 @@ function App({
                     {!data.profiles.length ? (
                       <Empty
                         icon={Fingerprint}
-                        title="为账号创建独立环境"
-                        description="关联账号和代理后，即可打开浏览器并手动登录 X。"
-                        action={addButton(
-                          "profile",
-                          "创建环境",
-                          !data.accounts.length || !data.proxies.length,
-                        )}
+                        title="打开你的第一个独立窗口"
+                        description="设置 SOCKS5 和浏览器指纹后，窗口会直接打开 X 登录页。"
+                        action={newWindowButton}
                       />
                     ) : (
                       <div className="table-scroll">
@@ -2042,6 +2015,20 @@ function App({
                   : "配置已添加",
             );
             setModal(null);
+          }}
+        />
+      )}
+      {windowCreator && (
+        <CreateWindowDialog
+          account={windowCreator.account}
+          proxies={data.proxies}
+          chromiumVersion={data.chromium?.version}
+          onClose={() => setWindowCreator(null)}
+          onCreated={async (profile) => {
+            setWindowCreator(null);
+            go("profiles");
+            await refresh();
+            await openBrowser(profile);
           }}
         />
       )}
@@ -3367,6 +3354,203 @@ function ImportDialog({
   );
 }
 
+function CreateWindowDialog({
+  account,
+  proxies,
+  chromiumVersion,
+  onClose,
+  onCreated,
+}: {
+  account?: Account;
+  proxies: Proxy[];
+  chromiumVersion?: string | null;
+  onClose: () => void;
+  onCreated: (profile: Profile) => Promise<void>;
+}) {
+  const [id] = useState(() => crypto.randomUUID());
+  const [proxyId, setProxyId] = useState(
+    proxies.find((proxy) => proxy.status === "ok")?.id ?? proxies[0]?.id ?? "",
+  );
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    const form = new FormData(event.currentTarget);
+    const read = (name: string) => String(form.get(name) ?? "");
+    setError("");
+    setPending(true);
+    try {
+      const { profile } = (await request("/api/windows", "POST", {
+        id,
+        label: read("label"),
+        accountId: account?.id,
+        proxy: proxyId
+          ? { id: proxyId }
+          : {
+              host: read("host"),
+              port: Number(read("port")),
+              username: read("username"),
+              password: read("password"),
+            },
+        locale: read("locale"),
+        timezone: read("timezone"),
+        width: Number(read("width")),
+        height: Number(read("height")),
+      })) as { profile: Profile };
+      await onCreated(profile);
+    } catch (error) {
+      setError((error as Error).message);
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog
+      title="新建窗口"
+      description="设置代理和指纹后，直接打开 X 登录页。"
+      onClose={() => {
+        if (!pending) onClose();
+      }}
+    >
+      <form onSubmit={submit}>
+        <div className="dialog-body">
+          <Field label="窗口名称（选填）">
+            <input
+              name="label"
+              maxLength={80}
+              defaultValue={account?.label}
+              placeholder="自动命名"
+              disabled={pending}
+            />
+          </Field>
+          <h3 className="form-divider">SOCKS5 代理</h3>
+          {proxies.length > 0 && (
+            <Field label="选择代理">
+              <select
+                aria-label="选择代理"
+                value={proxyId}
+                onChange={(event) => setProxyId(event.target.value)}
+                disabled={pending}
+              >
+                {proxies.map((proxy) => (
+                  <option key={proxy.id} value={proxy.id}>
+                    {proxy.label} · {proxy.host}:{proxy.port}
+                  </option>
+                ))}
+                <option value="">添加新代理</option>
+              </select>
+            </Field>
+          )}
+          {!proxyId && (
+            <>
+              <div className="form-grid host-grid">
+                <Field label="主机或 IP">
+                  <input
+                    name="host"
+                    maxLength={253}
+                    placeholder="proxy.example.com"
+                    required
+                    disabled={pending}
+                  />
+                </Field>
+                <Field label="端口">
+                  <input
+                    name="port"
+                    type="number"
+                    min={1}
+                    max={65535}
+                    defaultValue={1080}
+                    required
+                    disabled={pending}
+                  />
+                </Field>
+              </div>
+              <div className="form-grid">
+                <Field label="代理用户名（选填）">
+                  <input
+                    name="username"
+                    autoComplete="off"
+                    disabled={pending}
+                  />
+                </Field>
+                <Field label="代理密码（选填）">
+                  <input
+                    name="password"
+                    type="password"
+                    autoComplete="new-password"
+                    disabled={pending}
+                  />
+                </Field>
+              </div>
+            </>
+          )}
+          <h3 className="form-divider">
+            浏览器指纹
+            {chromiumVersion && <span>Chromium {chromiumVersion}</span>}
+          </h3>
+          <div className="form-grid">
+            <Field label="浏览器语言">
+              <input
+                name="locale"
+                maxLength={30}
+                defaultValue="zh-CN"
+                required
+                disabled={pending}
+              />
+            </Field>
+            <Field label="时区">
+              <input
+                name="timezone"
+                maxLength={80}
+                defaultValue="Asia/Shanghai"
+                required
+                disabled={pending}
+              />
+            </Field>
+            <Field label="窗口宽度">
+              <input
+                name="width"
+                type="number"
+                min={320}
+                max={3840}
+                defaultValue={1440}
+                required
+                disabled={pending}
+              />
+            </Field>
+            <Field label="窗口高度">
+              <input
+                name="height"
+                type="number"
+                min={320}
+                max={2160}
+                defaultValue={900}
+                required
+                disabled={pending}
+              />
+            </Field>
+          </div>
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <div className="dialog-footer">
+          <Button type="button" disabled={pending} onClick={onClose}>
+            取消
+          </Button>
+          <Button type="submit" variant="primary" busy={pending}>
+            创建并打开
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
 function EntityForm({
   modal,
   data,
@@ -3503,7 +3687,7 @@ function EntityForm({
               </Field>
               <Field
                 label="X 用户名"
-                hint="可留空。授权时会核对已填写的用户名。"
+                hint="可留空。账号登录在对应的 X 窗口中完成。"
               >
                 <div className="input-prefix">
                   <span>@</span>
