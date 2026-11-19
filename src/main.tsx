@@ -3775,12 +3775,55 @@ function PublishDialog({
   );
 }
 
+type LoginHistoryEntry = { suffix: string; usedAt: number };
+
+const loginHistoryKey = "nodex:login-history";
+const loginHistoryLimit = 8;
+const loginHistoryDate = new Intl.DateTimeFormat("zh-CN", {
+  dateStyle: "short",
+  timeStyle: "short",
+});
+
+function loadLoginHistory(): LoginHistoryEntry[] {
+  try {
+    const data: unknown = JSON.parse(localStorage.getItem(loginHistoryKey) || "[]");
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter(
+        (entry): entry is LoginHistoryEntry =>
+          entry !== null &&
+          typeof entry === "object" &&
+          typeof entry.suffix === "string" &&
+          /^[A-Za-z0-9_-]{4}$/.test(entry.suffix) &&
+          Number.isSafeInteger(entry.usedAt) &&
+          entry.usedAt > 0 &&
+          entry.usedAt <= Date.now() + 60_000,
+      )
+      .slice(0, loginHistoryLimit)
+      .map(({ suffix, usedAt }) => ({ suffix, usedAt }));
+  } catch {
+    return [];
+  }
+}
+
+function saveLoginHistory(history: LoginHistoryEntry[]): void {
+  try {
+    if (history.length) localStorage.setItem(loginHistoryKey, JSON.stringify(history));
+    else localStorage.removeItem(loginHistoryKey);
+  } catch {
+    // Browsers can block local storage. The sign-in session still works.
+  }
+}
+
 function AuthGate() {
   const [state, setState] = useState<
     "checking" | "authenticated" | "anonymous" | "error"
   >("checking");
   const [error, setError] = useState("");
   const [code, setCode] = useState("");
+  const [remember, setRemember] = useState(false);
+  const [loginHistory, setLoginHistory] = useState(loadLoginHistory);
+  const [historyIndex, setHistoryIndex] = useState("");
   const [pending, setPending] = useState(false);
   const [checking, setChecking] = useState(false);
   const sequence = useRef(0);
@@ -3901,13 +3944,22 @@ function AuthGate() {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     credentials: "same-origin",
-                    body: JSON.stringify({ code: code.trim() }),
+                    body: JSON.stringify({ code: code.trim(), remember }),
                   });
                   const result = await response.json().catch(() => ({}));
                   if (!response.ok)
                     throw new Error(
                       result.error || "登录失败，请检查登录码后重试。",
                     );
+                  if (remember) {
+                    const history = [
+                      { suffix: code.trim().slice(-4), usedAt: Date.now() },
+                      ...loadLoginHistory(),
+                    ].slice(0, loginHistoryLimit);
+                    saveLoginHistory(history);
+                    setLoginHistory(history);
+                    setHistoryIndex("");
+                  }
                   setCode("");
                   await check();
                 } catch (err) {
@@ -3937,6 +3989,15 @@ function AuthGate() {
                   }}
                 />
               </Field>
+              <label className="checkbox-field access-remember">
+                <input
+                  type="checkbox"
+                  checked={remember}
+                  disabled={pending}
+                  onChange={(event) => setRemember(event.target.checked)}
+                />
+                <span>在此浏览器记住登录（7 天）</span>
+              </label>
               {error && (
                 <p
                   id="access-error"
@@ -3959,6 +4020,45 @@ function AuthGate() {
               >
                 进入工作空间
               </Button>
+              <div className="access-history">
+                <Field label="历史登录码">
+                  <select
+                    value={historyIndex}
+                    disabled={!loginHistory.length || pending}
+                    onChange={(event) => setHistoryIndex(event.target.value)}
+                  >
+                    <option value="">
+                      {loginHistory.length ? "选择一条历史记录" : "暂无历史记录"}
+                    </option>
+                    {loginHistory.map(({ suffix, usedAt }, index) => (
+                      <option key={`${usedAt}-${suffix}-${index}`} value={index}>
+                        NX-••••{suffix} · {loginHistoryDate.format(usedAt)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                {loginHistory.length > 0 && (
+                  <div className="access-history-actions">
+                    <span aria-live="polite">
+                      {historyIndex === ""
+                        ? "仅保留已使用登录码的末四位。"
+                        : "这枚登录码已使用，请输入新码。"}
+                    </span>
+                    <button
+                      className="text-button"
+                      type="button"
+                      disabled={pending}
+                      onClick={() => {
+                        saveLoginHistory([]);
+                        setLoginHistory([]);
+                        setHistoryIndex("");
+                      }}
+                    >
+                      清除历史
+                    </button>
+                  </div>
+                )}
+              </div>
             </form>
           )}
         </section>

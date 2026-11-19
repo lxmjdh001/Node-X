@@ -3147,6 +3147,26 @@ td strong {
   min-height: 44px;
   font-size: 12px;
 }
+.access-remember {
+  margin: -7px 0 20px;
+}
+.access-history {
+  margin-top: 23px;
+  padding-top: 18px;
+  border-top: 1px solid #ebeff5;
+}
+.access-history .field {
+  margin-bottom: 0;
+}
+.access-history-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 9px;
+  color: #586780;
+  font-size: 12px;
+}
 .access-card .form-error {
   margin-top: -7px;
   margin-bottom: 20px;

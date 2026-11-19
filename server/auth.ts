@@ -8,6 +8,7 @@ import { InputError } from './errors.js';
 import { db } from './store.js';
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
+const REMEMBERED_SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const CHALLENGE_MS = 2 * 60 * 1000;
 const FAILURE_WINDOW_MS = 10 * 60 * 1000;
 const SESSION_COOKIE = 'nodex_session';
@@ -271,7 +272,9 @@ auth.post('/auth/login', (req, res) => {
   }
   const now = Date.now();
   const token = randomBytes(32).toString('base64url');
-  const expiresAt = now + SESSION_MS;
+  const remember = req.body?.remember === true;
+  const duration = remember ? REMEMBERED_SESSION_MS : SESSION_MS;
+  const expiresAt = now + duration;
   let accepted = false;
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -294,7 +297,10 @@ auth.post('/auth/login', (req, res) => {
     countAttempt(req, 'login-failures');
     throw new InputError('登录码无效、已使用或已过期。', 401);
   }
-  res.cookie(SESSION_COOKIE, token, { ...cookieOptions(), maxAge: SESSION_MS });
+  res.cookie(SESSION_COOKIE, token, {
+    ...cookieOptions(),
+    ...(remember ? { maxAge: duration } : {}),
+  });
   res.json({ ok: true, authenticated: true, expiresAt: new Date(expiresAt).toISOString() });
 });
 
