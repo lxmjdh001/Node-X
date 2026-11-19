@@ -25,6 +25,7 @@ import {
   LayoutDashboard,
   Link2,
   LoaderCircle,
+  LogOut,
   Menu,
   Monitor,
   Network,
@@ -44,6 +45,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import OperatorApp from "./operator";
 import "./styles.css";
 
 type Account = {
@@ -192,6 +194,9 @@ async function request(path: string, method = "GET", body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    window.dispatchEvent(new Event("nodex:auth-expired"));
+  }
   if (!response.ok)
     throw new Error(data.error || `请求失败（${response.status}）`);
   return data;
@@ -375,7 +380,7 @@ function Field({
   );
 }
 
-function App() {
+function App({ onLogout }: { onLogout: () => Promise<void> }) {
   const initialPage = window.location.hash.slice(1) as Page;
   const [page, setPage] = useState<Page>(
     [...nav.map((n) => n.id), "settings"].includes(initialPage)
@@ -807,6 +812,24 @@ function App() {
             <span className="user-avatar" title="本地管理员">
               N
             </span>
+            <Button
+              variant="ghost"
+              icon={LogOut}
+              className="logout-control"
+              busy={busy === "logout"}
+              onClick={async () => {
+                setBusy("logout");
+                try {
+                  await onLogout();
+                } catch (error) {
+                  setToast({ text: (error as Error).message, error: true });
+                } finally {
+                  setBusy("");
+                }
+              }}
+            >
+              退出
+            </Button>
           </div>
         </header>
         <main>
@@ -3752,8 +3775,215 @@ function PublishDialog({
   );
 }
 
+function AuthGate() {
+  const [state, setState] = useState<
+    "checking" | "authenticated" | "anonymous" | "error"
+  >("checking");
+  const [error, setError] = useState("");
+  const [code, setCode] = useState("");
+  const [pending, setPending] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const sequence = useRef(0);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  const check = async () => {
+    const current = ++sequence.current;
+    setChecking(true);
+    try {
+      const response = await fetch("/api/auth/status", {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      const result = await response.json();
+      if (!response.ok)
+        throw new Error(result.error || "无法检查登录状态，请重试。");
+      if (current === sequence.current) {
+        setState(result.authenticated ? "authenticated" : "anonymous");
+        setError("");
+      }
+    } catch (err) {
+      if (current === sequence.current) {
+        setState((previous) =>
+          previous === "authenticated" ? previous : "error",
+        );
+        setError((err as Error).message);
+      }
+    } finally {
+      if (current === sequence.current) setChecking(false);
+    }
+  };
+  useEffect(() => {
+    void check();
+    const expired = () => {
+      sequence.current++;
+      setState("anonymous");
+      setCode("");
+      setError("登录已过期，请输入新的登录码。");
+      setChecking(false);
+    };
+    const visible = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void check();
+    }, 20000);
+    window.addEventListener("nodex:auth-expired", expired);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      clearInterval(timer);
+      sequence.current++;
+      window.removeEventListener("nodex:auth-expired", expired);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, []);
+  const logout = async () => {
+    const response = await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      credentials: "same-origin",
+    });
+    if (!response.ok && response.status !== 401) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || "退出失败，请重试。");
+    }
+    sequence.current++;
+    setState("anonymous");
+    setCode("");
+    setError("");
+  };
+  if (state === "authenticated") return <App onLogout={logout} />;
+  return (
+    <div className="access-shell">
+      <header className="access-header">
+        <a href="/" className="access-brand">
+          Node X<span>工作空间</span>
+        </a>
+        <span className="access-header-note">登录入口</span>
+      </header>
+      <main className="access-main">
+        <section className="access-card">
+          <div className="access-symbol">
+            <Icon icon={ShieldCheck} size={27} />
+          </div>
+          <h1>登录工作空间</h1>
+          <p className="access-description">
+            输入管理员提供的登录码，继续使用 Node X。
+          </p>
+          {state === "checking" ? (
+            <div className="access-loading" role="status">
+              <Icon icon={LoaderCircle} className="spin" size={22} />
+              <span>正在检查登录状态…</span>
+            </div>
+          ) : state === "error" ? (
+            <>
+              <p className="form-error" role="alert">
+                {error}
+              </p>
+              <Button
+                variant="primary"
+                icon={RefreshCw}
+                busy={checking}
+                className="access-submit"
+                onClick={() => void check()}
+              >
+                重新连接
+              </Button>
+            </>
+          ) : (
+            <form
+              onSubmit={async (event) => {
+                event.preventDefault();
+                if (!code.trim() || pending) return;
+                setPending(true);
+                setError("");
+                try {
+                  const response = await fetch("/api/auth/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "same-origin",
+                    body: JSON.stringify({ code: code.trim() }),
+                  });
+                  const result = await response.json().catch(() => ({}));
+                  if (!response.ok)
+                    throw new Error(
+                      result.error || "登录失败，请检查登录码后重试。",
+                    );
+                  setCode("");
+                  await check();
+                } catch (err) {
+                  setError((err as Error).message);
+                  requestAnimationFrame(() => errorRef.current?.focus());
+                } finally {
+                  setPending(false);
+                }
+              }}
+            >
+              <Field label="登录码">
+                <input
+                  autoFocus
+                  required
+                  type="password"
+                  autoComplete="one-time-code"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  placeholder="粘贴登录码"
+                  value={code}
+                  disabled={pending}
+                  aria-invalid={!!error}
+                  aria-describedby={error ? "access-error" : undefined}
+                  onChange={(event) => {
+                    setCode(event.target.value);
+                    setError("");
+                  }}
+                />
+              </Field>
+              {error && (
+                <p
+                  id="access-error"
+                  ref={errorRef}
+                  tabIndex={-1}
+                  className="form-error"
+                  role="alert"
+                >
+                  <Icon icon={CircleHelp} size={16} />
+                  {error}
+                </p>
+              )}
+              <Button
+                type="submit"
+                variant="primary"
+                icon={ArrowRight}
+                className="access-submit"
+                disabled={!code.trim()}
+                busy={pending}
+              >
+                进入工作空间
+              </Button>
+            </form>
+          )}
+          <div className="access-help">
+            <Icon icon={CircleHelp} size={15} />
+            <p>
+              没有登录码时，请向管理员获取。登录码生成器由管理员在自己的 Mac
+              Chrome 中使用。
+            </p>
+          </div>
+        </section>
+        <p className="access-footer">
+          Node X<span />
+          账号与浏览器环境管理
+        </p>
+      </main>
+    </div>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    {window.location.pathname.replace(/\/+$/, "") === "/operator" ? (
+      <OperatorApp />
+    ) : (
+      <AuthGate />
+    )}
   </React.StrictMode>,
 );

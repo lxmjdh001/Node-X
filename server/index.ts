@@ -2,8 +2,9 @@ import './env.js';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import express, { type ErrorRequestHandler } from 'express';
+import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import { ZodError } from 'zod';
+import { auth, operatorAuth, requireAuth } from './auth.js';
 import { shutdownBrowsers } from './browser.js';
 import { camoufox } from './camoufox-routes.js';
 import { ContentError } from './content.js';
@@ -14,45 +15,114 @@ import { recoverPublishQueue, runPublishQueue, waitForPublisher } from './publis
 import { db } from './store.js';
 import { workspace } from './workspace.js';
 
-const port = Number(process.env.PORT || 4173);
-if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须是 1–65535 之间的整数。');
-const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+function readPort(value: string | number, name: string) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`${name} 必须是 1–65535 之间的整数。`);
+  return port;
+}
+
+function publicOrigin() {
+  const value = process.env.NODEX_PUBLIC_ORIGIN?.trim();
+  if (!value) return null;
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('NODEX_PUBLIC_ORIGIN 必须是完整的 HTTPS 来源，不含路径、查询参数或凭据。');
+  }
+  return url;
+}
+
+const port = readPort(process.env.PORT || 4173, 'PORT');
+const operatorPort = readPort(process.env.NODEX_OPERATOR_PORT || port + 1, 'NODEX_OPERATOR_PORT');
+if (port === operatorPort) throw new Error('工作台和生成页必须使用不同端口。');
+const external = publicOrigin();
+if (external) process.env.NODEX_PUBLIC_HTTPS = '1';
+const localHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+const operatorAccessPort = readPort(process.env.NODEX_OPERATOR_ACCESS_PORT || operatorPort, 'NODEX_OPERATOR_ACCESS_PORT');
+const operatorHost = `127.0.0.1:${operatorPort}`;
+const operatorHosts = new Set([operatorHost, `127.0.0.1:${operatorAccessPort}`]);
 const dev = process.argv.includes('--dev');
+
 const app = express();
+const operatorApp = express();
 app.disable('x-powered-by');
+operatorApp.disable('x-powered-by');
+// Only the same-host reverse proxy may supply the effective public protocol or client IP.
+app.set('trust proxy', 'loopback');
 const server = createServer(app);
+const operatorServer = createServer(operatorApp);
 
-app.use((req, res, next) => {
-  if (!hosts.has(req.headers.host || '')) {
-    res.status(403).json({ error: '只允许通过本机地址访问。' });
-    return;
-  }
+const securityHeaders: RequestHandler = (_req, res, next) => {
   res.set('Referrer-Policy', 'no-referrer');
-  res.set('Content-Security-Policy', "frame-ancestors 'none'");
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'none'");
   next();
-});
+};
 
-app.use('/api', (req, res, next) => {
-  res.set('Cache-Control', 'no-store');
-  const origin = req.headers.origin;
-  const callback = req.method === 'GET' && req.path === '/x/callback';
-  if (!callback && (req.headers['sec-fetch-site'] === 'cross-site' || (origin && origin !== `http://${req.headers.host}`))) {
-    res.status(403).json({ error: '请求必须来自本地工作台。' });
-    return;
-  }
-  const writesBody = req.method === 'POST' || req.method === 'PATCH';
-  if (writesBody && (req.headers['content-length'] !== undefined || req.headers['transfer-encoding']) &&
-      req.headers['content-length'] !== '0' && !req.is('application/json')) {
-    res.status(415).json({ error: '请求正文必须为 JSON。' });
+app.use(securityHeaders, (req, res, next) => {
+  const host = req.headers.host || '';
+  const valid = external ? host === external.host && req.secure : localHosts.has(host);
+  if (!valid) {
+    res.status(403).json({ error: '此工作台只能通过配置的地址访问。' });
     return;
   }
   next();
 });
+app.get('/healthz', (_req, res) => { res.set('Cache-Control', 'no-store').json({ ok: true }); });
+app.use('/operator', (_req, res) => { res.sendStatus(404); });
+
+function sameOrigin(expected: (host: string) => string, allowOAuth = false): RequestHandler {
+  return (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    const origin = req.headers.origin;
+    const callback = allowOAuth && req.method === 'GET' && req.path === '/x/callback';
+    if (!callback && (req.headers['sec-fetch-site'] === 'cross-site' || (origin && origin !== expected(req.headers.host || '')))) {
+      res.status(403).json({ error: '请求必须来自当前工作台。' });
+      return;
+    }
+    const writesBody = req.method === 'POST' || req.method === 'PATCH';
+    if (writesBody && (req.headers['content-length'] !== undefined || req.headers['transfer-encoding']) &&
+        req.headers['content-length'] !== '0' && !req.is('application/json')) {
+      res.status(415).json({ error: '请求正文必须为 JSON。' });
+      return;
+    }
+    next();
+  };
+}
+
+app.use('/api', sameOrigin((host) => external?.origin || `http://${host}`, true));
+app.use('/api/auth', express.json({ limit: '8kb' }));
+app.use('/api', auth);
+app.use('/api', requireAuth);
 app.use('/api/import', express.json({ limit: '1200kb' }), imports);
 app.use('/api/camoufox', express.json({ limit: '32kb' }), camoufox);
 app.use('/api', express.json({ limit: '32kb' }), workspace, editor, (_req, res) => {
   res.status(404).json({ error: '找不到这个接口。' });
 });
+
+operatorApp.use(securityHeaders, (req, res, next) => {
+  if (!operatorHosts.has(req.headers.host || '')) {
+    res.sendStatus(404);
+    return;
+  }
+  next();
+});
+operatorApp.get('/healthz', (_req, res) => { res.set('Cache-Control', 'no-store').json({ ok: true }); });
+operatorApp.use((req, res, next) => {
+  const ua = req.headers['user-agent'] || '';
+  const brands = req.headers['sec-ch-ua'];
+  const desktopChrome = /Macintosh/.test(ua) && /\bChrome\/\d/.test(ua) &&
+    !/\b(Edg|OPR|Vivaldi|Brave)\//.test(ua) && (typeof brands !== 'string' || brands.includes('"Google Chrome"'));
+  if (!desktopChrome) {
+    res.status(403).type('text/plain; charset=utf-8').send('请在已登记的 Mac Chrome 浏览器中打开登录码生成页。');
+    return;
+  }
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+operatorApp.use('/operator/api', sameOrigin((host) => `http://${host}`), express.json({ limit: '8kb' }));
+operatorApp.use(operatorAuth);
+operatorApp.use('/operator/api', (_req, res) => { res.status(404).json({ error: '找不到这个接口。' }); });
+operatorApp.use('/api', (_req, res) => { res.sendStatus(404); });
 
 const apiError: ErrorRequestHandler = (error, _req, res, _next) => {
   if (error instanceof InputError) {
@@ -73,6 +143,7 @@ const apiError: ErrorRequestHandler = (error, _req, res, _next) => {
   }
 };
 app.use('/api', apiError);
+operatorApp.use(apiError);
 
 let closePreview: (() => Promise<void>) | undefined;
 if (dev) {
@@ -81,31 +152,44 @@ if (dev) {
     server: { middlewareMode: true, hmr: { server } },
   });
   app.use(vite.middlewares);
+  operatorApp.use(vite.middlewares);
   closePreview = () => vite.close();
 } else {
   const dist = resolve('dist');
-  if (!existsSync(resolve(dist, 'index.html'))) throw new Error('请先运行 npm run build。');
+  const index = resolve(dist, 'index.html');
+  if (!existsSync(index)) throw new Error('请先运行 npm run build。');
   app.use(express.static(dist));
-  app.get('/', (_req, res) => res.sendFile(resolve(dist, 'index.html')));
+  app.get('/', (_req, res) => res.sendFile(index));
+  operatorApp.use('/assets', express.static(resolve(dist, 'assets')));
+  operatorApp.get('/operator', (_req, res) => res.sendFile(index));
 }
 
 let queue: ReturnType<typeof setInterval>;
-server.listen(port, '127.0.0.1', () => {
-  recoverPublishQueue();
-  runPublishQueue();
-  queue = setInterval(runPublishQueue, 2000);
-  console.log(`Node X 本地工作台 http://127.0.0.1:${port}`);
-});
+await Promise.all([
+  new Promise<void>((done, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', done);
+  }),
+  new Promise<void>((done, reject) => {
+    operatorServer.once('error', reject);
+    operatorServer.listen(operatorPort, '127.0.0.1', done);
+  }),
+]);
+recoverPublishQueue();
+runPublishQueue();
+queue = setInterval(runPublishQueue, 2000);
+console.log(`Node X 工作台 ${external?.origin || `http://127.0.0.1:${port}`}`);
+console.log(`Node X 登录码管理 http://${operatorHost}/operator`);
 
 let closing = false;
 async function shutdown() {
   if (closing) return;
   closing = true;
   clearInterval(queue);
-  const drained = new Promise<void>((done) => server.close(() => done()));
+  const drained = [server, operatorServer].map((service) => new Promise<void>((done) => service.close(() => done())));
   const watchdog = setTimeout(() => process.exit(1), 15_000);
   watchdog.unref();
-  await Promise.allSettled([closePreview?.(), shutdownBrowsers(), drained]);
+  await Promise.allSettled([closePreview?.(), shutdownBrowsers(), ...drained]);
   await waitForPublisher();
   db.close();
   clearTimeout(watchdog);
