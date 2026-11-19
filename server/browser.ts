@@ -7,7 +7,7 @@ import { createConnection, createServer, isIP, type Socket } from 'node:net';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { domainToASCII } from 'node:url';
-import { chromium, type BrowserContext, type Page } from 'playwright';
+import { chromium, type BrowserContext, type Page, type Response } from 'playwright';
 import { RequestError, Server as ProxyServer } from 'proxy-chain';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { workspaceAuthorized } from './auth.js';
@@ -308,6 +308,26 @@ async function closeSession(id: string, session: BrowserSession): Promise<void> 
   }
 }
 
+async function openXPage(page: Page, url: string): Promise<void> {
+  let forbidden = false;
+  const trackNavigation = (response: Response) => {
+    const request = response.request();
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      forbidden = response.status() === 403 && new URL(response.url()).origin === new URL(X_HOME_URL).origin;
+    }
+  };
+  // Chromium can reject the navigation before goto returns the HTTP response.
+  page.on('response', trackNavigation);
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  } catch (error) {
+    if (!forbidden) throw error;
+  } finally {
+    page.off('response', trackNavigation);
+  }
+  if (forbidden) throw new InputError('当前代理已连接，但 X 拒绝了网页访问（HTTP 403）。', 422);
+}
+
 /** Opens an ordinary Chromium window for manual use. The actual engine supplies its own UA/version. */
 export async function startBrowser(profile: BrowserSettings): Promise<{ version: string }> {
   profile = { ...profile, proxy: { ...profile.proxy } };
@@ -366,8 +386,7 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
       if (!version) throw new Error('无法读取实际浏览器版本。');
       const sessionCookies = await context.cookies(X_HOME_URL);
       const page = context.pages()[0] ?? await context.newPage();
-      await page.goto(sessionCookies.some(({ name, value }) => name === 'auth_token' && value) ? X_HOME_URL : X_LOGIN_URL,
-        { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      await openXPage(page, sessionCookies.some(({ name, value }) => name === 'auth_token' && value) ? X_HOME_URL : X_LOGIN_URL);
       if (!workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
       const session: BrowserSession = { context, bridge, version, workspaceId: customerId, remote, lastUse: Date.now(), inputPending: false };
       sessions.set(key, session);
