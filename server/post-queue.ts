@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, type PostLayout } from '../src/post-queue.js';
 import { sessionHasAccess } from './auth.js';
 import { validatePostText } from './content.js';
-import { addDraft } from './editor.js';
+import { addDraft, contentDeleteIds } from './editor.js';
 import { InputError, requireFound } from './errors.js';
 import { activeModel, runModel } from './models.js';
 import { postSource, readPostSource } from './post-source.js';
@@ -86,6 +86,12 @@ postQueue.get('/pending-posts', (_req, res) => {
     FROM pending_posts p ORDER BY p.createdAt DESC, p.batchId, p.variant
   `);
   res.json({ posts });
+});
+
+postQueue.post('/pending-posts/bulk-delete', (req, res) => {
+  const ids = contentDeleteIds.parse(req.body?.ids);
+  const deleted = write(`DELETE FROM pending_posts WHERE id IN (${ids.map(() => '?').join(', ')})`, ...ids);
+  res.json({ deleted });
 });
 
 postQueue.post('/pending-posts/source', async (req, res) => {

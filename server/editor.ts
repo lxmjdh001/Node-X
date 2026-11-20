@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
+import { MAX_BULK_DELETE_IDS } from '../src/post-queue.js';
 import { beginXAuthorization, ContentError, contentStatus, finishXAuthorization, generateDraft, validatePostText } from './content.js';
 import { InputError, requireFound } from './errors.js';
 import { publishable, scheduleWorkspace } from './publisher.js';
@@ -106,6 +107,17 @@ editor.patch('/drafts/:id', (req, res) => {
     throw new InputError('请先取消待发布任务。已发出或结果待确认的记录不能修改。', 409);
   }
   res.json(ok);
+});
+
+export const contentDeleteIds = z.array(z.uuid()).min(1).max(MAX_BULK_DELETE_IDS)
+  .refine(ids => new Set(ids).size === ids.length, '选中的内容存在重复。');
+const draftDeleteInput = z.object({ ids: contentDeleteIds, cancelScheduled: z.boolean().default(false) });
+
+editor.post('/drafts/bulk-delete', (req, res) => {
+  const { ids, cancelScheduled } = draftDeleteInput.parse(req.body);
+  const statuses = cancelScheduled ? "status != 'publishing'" : "status NOT IN ('scheduled', 'publishing')";
+  const deleted = write(`DELETE FROM drafts WHERE id IN (${ids.map(() => '?').join(', ')}) AND ${statuses}`, ...ids);
+  res.json({ deleted });
 });
 
 editor.delete('/drafts/:id', (req, res) => {

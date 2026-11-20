@@ -56,7 +56,7 @@ import {
 } from "./browser-region";
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
-import { assignmentModes, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, type AssignmentMode, type PendingPost, type PostLayout } from "./post-queue";
+import { assignmentModes, MAX_BULK_DELETE_IDS, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, type AssignmentMode, type PendingPost, type PostLayout } from "./post-queue";
 import { ModelPage } from "./models-page";
 import { Icon, Button, IconButton, Dialog, Field } from "./ui";
 import "./styles.css";
@@ -317,6 +317,7 @@ function App({
   const [pendingPostsError, setPendingPostsError] = useState("");
   const [loadingPosts, setLoadingPosts] = useState(true);
   const [selectedPostIds, setSelectedPostIds] = useState<string[]>([]);
+  const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
   const [postImportOpen, setPostImportOpen] = useState(false);
   const [postDistribution, setPostDistribution] = useState<PendingPost[] | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
@@ -350,7 +351,8 @@ function App({
     try {
       const { posts } = await request("/api/pending-posts") as { posts: PendingPost[] };
       setPendingPosts(posts);
-      setSelectedPostIds((ids) => ids.filter((id) => posts.some((post) => post.id === id)));
+      const receivedIds = new Set(posts.map(post => post.id));
+      setSelectedPostIds((ids) => ids.filter((id) => receivedIds.has(id)));
       setPendingPostsError("");
     } catch (error) {
       setPendingPostsError((error as Error).message);
@@ -532,6 +534,64 @@ function App({
         setConfirmation(null);
       },
     });
+  const visibleDrafts = data.drafts.filter(draft => draftFilter === "all" || draft.status === draftFilter);
+  const selectableDrafts = visibleDrafts.filter(draft => draft.status !== "publishing");
+  const checkedDraftIds = new Set(selectedDraftIds);
+  const checkedDrafts = selectableDrafts.filter(draft => checkedDraftIds.has(draft.id));
+
+  function changeDraftFilter(next: string) {
+    if (next === draftFilter) return;
+    setDraftFilter(next);
+    setSelectedDraftIds([]);
+    setSelectedPostIds([]);
+  }
+
+  function removeSelectedContent(type: "pending-posts" | "drafts", ids: string[], cancelScheduled = false) {
+    if (!ids.length) return;
+    const details = [
+      type === "drafts" ? "选中的记录将从 Node X 删除。" : "选中的待发布文案将从列表删除。",
+      cancelScheduled && "其中的排程将同时取消。",
+      "删除后无法恢复。",
+    ].filter(Boolean).join("");
+    setConfirmation({
+      title: `批量删除 ${ids.length} 条内容？`,
+      description: details,
+      label: "确认批量删除",
+      destructive: true,
+      action: async () => {
+        setBusy("delete-content");
+        let deleted = 0;
+        let processed = 0;
+        let failure = "";
+        try {
+          for (let offset = 0; offset < ids.length; offset += MAX_BULK_DELETE_IDS) {
+            const batch = ids.slice(offset, offset + MAX_BULK_DELETE_IDS);
+            const result = await request(`/api/${type}/bulk-delete`, "POST", {
+              ids: batch, ...(type === "drafts" ? { cancelScheduled } : {}),
+            }) as { deleted: number };
+            deleted += result.deleted;
+            processed += batch.length;
+          }
+        } catch (error) {
+          failure = (error as Error).message;
+        }
+        const attempted = new Set(ids.slice(0, processed));
+        const setSelection = type === "drafts" ? setSelectedDraftIds : setSelectedPostIds;
+        setSelection(current => current.filter(id => !attempted.has(id)));
+        await Promise.all([refreshPendingPosts(), ...(type === "drafts" ? [refresh()] : [])]);
+        setConfirmation(null);
+        setBusy("");
+        const remaining = ids.length - deleted;
+        setToast({
+          text: deleted
+            ? `已删除 ${deleted} 条内容。${remaining ? `另有 ${remaining} 条未删除。` : ""}${failure}`
+            : failure || "所选内容已不存在或正在发布，请刷新列表。",
+          error: Boolean(failure || !deleted),
+        });
+      },
+    });
+  }
+
   const addButton = (
     type: "proxy" | "draft",
     label: string,
@@ -1532,7 +1592,7 @@ function App({
                             aria-selected={draftFilter === value}
                             className={`tab ${draftFilter === value ? "active" : ""}`}
                             key={value}
-                            onClick={() => setDraftFilter(value)}
+                            onClick={() => changeDraftFilter(value)}
                           >
                             {label}
                             {value === "all" && (
@@ -1553,13 +1613,13 @@ function App({
                         loading={loadingPosts}
                         error={pendingPostsError}
                         onSelection={setSelectedPostIds}
+                        deleting={busy === "delete-content"}
+                        onRemove={(ids) => removeSelectedContent("pending-posts", ids)}
                         onRetry={refreshPendingPosts}
                         onImport={() => setPostImportOpen(true)}
                         onAssign={(posts) => setPostDistribution(posts)}
                       />
-                    ) : data.drafts.filter(
-                      (d) => draftFilter === "all" || d.status === draftFilter,
-                    ).length === 0 ? (
+                    ) : visibleDrafts.length === 0 ? (
                       <Empty
                         icon={FileText}
                         title={
@@ -1578,16 +1638,31 @@ function App({
                         }
                       />
                     ) : (
-                      <div className="draft-list">
-                        {data.drafts
-                          .filter(
-                            (d) =>
-                              draftFilter === "all" || d.status === draftFilter,
-                          )
-                          .map((draft) => (
+                      <>
+                        <ContentSelectionToolbar
+                          count={checkedDrafts.length}
+                          total={selectableDrafts.length}
+                          deleting={busy === "delete-content"}
+                          onSelectAll={() => setSelectedDraftIds(selectableDrafts.map(draft => draft.id))}
+                          onClear={() => setSelectedDraftIds([])}
+                          onRemove={() => removeSelectedContent(
+                            "drafts", checkedDrafts.map(draft => draft.id),
+                            checkedDrafts.some(draft => draft.status === "scheduled"),
+                          )}
+                        />
+                        <div className="draft-list">
+                          {visibleDrafts.map((draft, index) => (
                             <article className="draft-card" key={draft.id}>
                               <div className="draft-top">
                                 <div className="account-cell">
+                                  <ContentSelectionCheckbox
+                                    label={`选择第 ${index + 1} 条内容`}
+                                    title={draft.status === "publishing" ? "发布完成后即可选择" : undefined}
+                                    checked={draft.status !== "publishing" && checkedDraftIds.has(draft.id)}
+                                    disabled={draft.status === "publishing" || busy === "delete-content"}
+                                    onChange={(checked) => setSelectedDraftIds(ids =>
+                                      checked ? [...ids, draft.id] : ids.filter(id => id !== draft.id))}
+                                  />
                                   <span className="avatar small">
                                     {accountName(draft.accountId).slice(0, 1)}
                                   </span>
@@ -1728,7 +1803,8 @@ function App({
                               </div>
                             </article>
                           ))}
-                      </div>
+                        </div>
+                      </>
                     )}
                   </section>
                   <p className="page-footnote">
@@ -1871,7 +1947,7 @@ function App({
           aiConfigured={data.settings.aiConfigured}
           onClose={() => setPostImportOpen(false)}
           onCreated={async (count) => {
-            setDraftFilter("pending");
+            changeDraftFilter("pending");
             await refreshPendingPosts();
             setPostImportOpen(false);
             setToast({ text: `已将 ${count} 条文案加入待发布列表。` });
@@ -1885,8 +1961,7 @@ function App({
           onClose={() => setPostDistribution(null)}
           onAssigned={async ({ created, existing }) => {
             setPostDistribution(null);
-            setSelectedPostIds([]);
-            setDraftFilter("draft");
+            changeDraftFilter("draft");
             await Promise.all([refresh(), refreshPendingPosts()]);
             setToast({ text: `已创建 ${created} 条发布草稿${existing ? `，跳过 ${existing} 条已分配记录` : ""}。` });
           }}
@@ -3878,15 +3953,57 @@ function PostImportProgress({ label }: { label: string }) {
   );
 }
 
+function ContentSelectionCheckbox({ label, title, checked, disabled, onChange }: {
+  label: string;
+  title?: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="content-selection-control" title={title}>
+      <input type="checkbox" className="content-selection-checkbox" aria-label={label}
+        checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
+    </label>
+  );
+}
+
+function ContentSelectionToolbar({ count, total, deleting, onSelectAll, onClear, onRemove, children }: {
+  count: number;
+  total: number;
+  deleting: boolean;
+  onSelectAll: () => void;
+  onClear: () => void;
+  onRemove: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="content-selection-toolbar">
+      <div className="row-actions">
+        <Button type="button" variant="ghost" disabled={deleting || count === total} onClick={onSelectAll}>全选</Button>
+        <Button type="button" variant="ghost" disabled={deleting || count === 0} onClick={onClear}>取消选择</Button>
+        <small className="subtle" aria-live="polite">已选 {count} 条</small>
+      </div>
+      <div className="row-actions">
+        <Button type="button" variant="ghost" className="content-selection-remove" icon={Trash2}
+          disabled={deleting || count === 0} onClick={onRemove}>批量删除</Button>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function PendingPostsPanel({
-  posts, selected, accountsAvailable, loading, error, onSelection, onRetry, onImport, onAssign,
+  posts, selected, accountsAvailable, loading, error, deleting, onSelection, onRemove, onRetry, onImport, onAssign,
 }: {
   posts: PendingPost[];
   selected: string[];
   accountsAvailable: boolean;
   loading: boolean;
   error: string;
+  deleting: boolean;
   onSelection: (ids: string[]) => void;
+  onRemove: (ids: string[]) => void;
   onRetry: () => Promise<void>;
   onImport: () => void;
   onAssign: (posts: PendingPost[]) => void;
@@ -3898,32 +4015,40 @@ function PendingPostsPanel({
     description="导入帖子后，原文和相似稿会出现在这里。"
     action={<Button icon={Plus} variant="primary" onClick={onImport}>从帖子生成</Button>} />;
 
-  const enabled = selected.length > 0 && accountsAvailable;
   const selectionLimit = MAX_VARIANTS + 1;
+  const checked = new Set(selected);
+  const canAssign = selected.length > 0 && selected.length <= selectionLimit && accountsAvailable && !deleting;
   return (
     <>
-      <div className="post-queue-toolbar">
-        <div className="row-actions">
-          <Button type="button" variant="ghost" onClick={() => onSelection(selected.length ? [] : posts.slice(0, selectionLimit).map(post => post.id))}>
-            {selected.length ? "取消选择" : posts.length > selectionLimit ? `选择前 ${selectionLimit} 条` : "全选"}
-          </Button>
-          <small className="subtle" aria-live="polite">已选 {selected.length} 条</small>
-        </div>
-        <div className="row-actions">
-          {!accountsAvailable && <small className="subtle">先添加 X 账号即可分配。</small>}
-          <Button type="button" icon={Send} variant="primary" disabled={!enabled}
-            onClick={() => onAssign(selected.flatMap(id => posts.find(post => post.id === id) ?? []))}>
-            分配发布
-          </Button>
-        </div>
-      </div>
+      <ContentSelectionToolbar
+        count={selected.length}
+        total={posts.length}
+        deleting={deleting}
+        onSelectAll={() => onSelection(posts.map(post => post.id))}
+        onClear={() => onSelection([])}
+        onRemove={() => onRemove(selected)}
+      >
+        {!accountsAvailable && <small className="subtle">先添加 X 账号即可分配。</small>}
+        {accountsAvailable && selected.length > selectionLimit && (
+          <small className="subtle">每次最多分配 {selectionLimit} 条。</small>
+        )}
+        <Button type="button" icon={Send} variant="primary" disabled={!canAssign}
+          onClick={() => {
+            const postsById = new Map(posts.map(post => [post.id, post]));
+            onAssign(selected.flatMap(id => postsById.get(id) ?? []));
+          }}>
+          分配发布
+        </Button>
+      </ContentSelectionToolbar>
       <div className="post-queue-list">
         {posts.map((post, index) => (
           <article className="post-queue-row" key={post.id}>
-            <input type="checkbox" aria-label={`选择第 ${index + 1} 条待发布内容`}
-              checked={selected.includes(post.id)}
-              disabled={!selected.includes(post.id) && selected.length >= selectionLimit}
-              onChange={(event) => onSelection(event.target.checked ? [...selected, post.id] : selected.filter(id => id !== post.id))} />
+            <ContentSelectionCheckbox
+              label={`选择第 ${index + 1} 条待发布内容`}
+              checked={checked.has(post.id)}
+              disabled={deleting}
+              onChange={(value) => onSelection(value ? [...selected, post.id] : selected.filter(id => id !== post.id))}
+            />
             <div>
               <div className="post-queue-meta">
                 <Badge tone={post.variant === 0 ? "blue" : "neutral"}>

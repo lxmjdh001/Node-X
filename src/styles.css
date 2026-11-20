@@ -1111,7 +1111,7 @@ td strong {
   color: #5b6b83;
 }
 .draft-text {
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1.9;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -2191,7 +2191,7 @@ td strong {
     gap: 16px;
   }
   .draft-text {
-    font-size: 13px;
+    font-size: 11px;
   }
   .draft-date {
     font-size: 10px;
@@ -3898,7 +3898,7 @@ td strong {
   }
 }
 
-.post-queue-toolbar,
+.content-selection-toolbar,
 .post-queue-meta {
   display: flex;
   align-items: center;
@@ -3906,10 +3906,41 @@ td strong {
   gap: 10px;
 }
 
-.post-queue-toolbar {
+.content-selection-toolbar {
   justify-content: space-between;
   padding: 12px 20px;
   border-bottom: 1px solid var(--border);
+}
+
+.content-selection-toolbar > .row-actions {
+  flex-wrap: wrap;
+}
+
+.content-selection-remove:not(:disabled) {
+  color: var(--red);
+}
+
+.content-selection-control {
+  display: grid;
+  inline-size: 26px;
+  block-size: 26px;
+  flex: none;
+  place-items: center;
+}
+
+.content-selection-checkbox {
+  inline-size: 16px;
+  block-size: 16px;
+  flex: none;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+@media (pointer: coarse) {
+  .content-selection-control {
+    inline-size: 44px;
+    block-size: 44px;
+  }
 }
 
 .post-queue-row {
@@ -3923,10 +3954,9 @@ td strong {
 
 .post-queue-row:last-child { border-bottom: 0; }
 
-.post-queue-row > input { margin-top: 4px; }
-
 .post-queue-text {
   margin-top: 8px;
+  font-size: 14px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   line-height: 1.65;

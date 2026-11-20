@@ -1,4 +1,5 @@
 export const MAX_VARIANTS = 50;
+export const MAX_BULK_DELETE_IDS = 500;
 export const MAX_SOURCE_TEXT = 8000;
 export const MAX_POST_LINK = 2048;
 export const MAX_FORMAT_REQUIREMENTS = 500;
