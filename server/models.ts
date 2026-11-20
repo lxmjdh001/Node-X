@@ -152,7 +152,7 @@ const textParts = z.array(z.object({ type: z.string(), text: z.string().optional
 const messagesResult = z.object({ content: textParts });
 const responsesResult = z.object({
   status: z.string().optional(),
-  output: z.array(z.object({ type: z.string(), content: textParts.optional() })).optional(),
+  output: z.array(z.object({ type: z.string(), content: textParts.nullish() })).optional(),
 });
 const chatResult = z.object({ choices: z.array(z.object({ message: z.object({ content: z.string().nullable() }) })) });
 
