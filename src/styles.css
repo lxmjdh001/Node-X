@@ -3835,8 +3835,14 @@ td strong {
 
 .post-generation-fields {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: 12px;
+}
+
+@media (max-width: 520px) {
+  .post-generation-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .post-format-requirements textarea {

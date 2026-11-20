@@ -11,6 +11,15 @@ export const postLayouts = {
 
 export type PostLayout = keyof typeof postLayouts;
 
+export const postOutputLanguages = {
+  source: '跟随原文',
+  'zh-CN': '简体中文',
+  en: '英文',
+  ja: '日文',
+} as const;
+
+export type PostOutputLanguage = keyof typeof postOutputLanguages;
+
 export const assignmentModes = {
   oneAccount: '一个账号发一条或多条',
   oneEach: '多个账号各发不同的一条',

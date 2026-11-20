@@ -56,7 +56,7 @@ import {
 } from "./browser-region";
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
-import { assignmentModes, MAX_BULK_DELETE_IDS, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, type AssignmentMode, type PendingPost, type PostLayout } from "./post-queue";
+import { assignmentModes, MAX_BULK_DELETE_IDS, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, postOutputLanguages, type AssignmentMode, type PendingPost, type PostLayout, type PostOutputLanguage } from "./post-queue";
 import { ModelPage } from "./models-page";
 import { Icon, Button, IconButton, Dialog, Field } from "./ui";
 import "./styles.css";
@@ -3828,14 +3828,16 @@ function PostImportDialog({
   const [text, setText] = useState("");
   const [count, setCount] = useState("3");
   const [layout, setLayout] = useState<PostLayout>("automatic");
+  const [outputLanguage, setOutputLanguage] = useState<PostOutputLanguage>("source");
   const [formatRequirements, setFormatRequirements] = useState("");
   const [busy, setBusy] = useState<"source" | "generate" | "refresh" | "">("");
   const [error, setError] = useState("");
   const number = Number(count);
   const countValid = Boolean(count) && Number.isInteger(number) && number >= 0 && number <= MAX_VARIANTS;
+  const languageLabel = outputLanguage === "source" ? "" : postOutputLanguages[outputLanguage];
   const progressLabel = busy === "source" ? "正在读取原帖正文…"
     : busy === "refresh" ? "文案已保存，正在更新待发布列表…"
-    : busy === "generate" ? number > 0 ? `正在生成 ${number} 条相似稿…` : "正在保存原文…"
+    : busy === "generate" ? number > 0 ? `正在生成 ${number} 条${languageLabel}相似稿…` : "正在保存原文…"
     : "";
 
   async function readLink() {
@@ -3861,6 +3863,7 @@ function PostImportDialog({
       const { count: created } = await request("/api/pending-posts", "POST", {
         id, text: text || undefined, url: url.trim() || undefined, count: number,
         layout: number > 0 ? layout : undefined,
+        outputLanguage: number > 0 ? outputLanguage : undefined,
         formatRequirements: aiConfigured && number > 0 ? formatRequirements.trim() || undefined : undefined,
       }) as { count: number };
       setBusy("refresh");
@@ -3898,6 +3901,12 @@ function PostImportDialog({
             <Field label="相似稿数量" hint={`可生成 0 到 ${MAX_VARIANTS} 条。另保留 1 条原文。`}>
               <input type="number" min={0} max={MAX_VARIANTS} step={1} value={count}
                 disabled={!!busy} onChange={(event) => setCount(event.target.value)} required />
+            </Field>
+            <Field label="生成语言" hint={aiConfigured ? undefined : "设置写作模型后可指定语言。"}>
+              <select value={outputLanguage} disabled={!!busy || !aiConfigured || !countValid || number === 0}
+                onChange={(event) => setOutputLanguage(event.target.value as PostOutputLanguage)}>
+                {Object.entries(postOutputLanguages).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
             </Field>
             <Field label="相似稿排版">
               <select value={layout} disabled={!!busy || !countValid || number === 0}
