@@ -12,6 +12,7 @@ import { ContentError } from './content.js';
 import { editor } from './editor.js';
 import { InputError } from './errors.js';
 import { imports } from './imports.js';
+import { postQueue } from './post-queue.js';
 import { clientLauncher, redeemLauncherTicket } from './launcher.js';
 import { reapLauncherPresence, reportLauncherPresence } from './launcher-presence.js';
 import { recoverPublishQueue, runPublishQueue, waitForPublisher } from './publisher.js';
@@ -112,7 +113,7 @@ app.use('/api', auth);
 app.use('/api', requireAuth);
 app.use('/api/import', express.json({ limit: '1200kb' }), imports);
 app.use('/api/camoufox', express.json({ limit: '32kb' }), camoufox);
-app.use('/api', express.json({ limit: '32kb' }), workspace, editor, (_req, res) => {
+app.use('/api', express.json({ limit: '32kb' }), workspace, editor, postQueue, (_req, res) => {
   res.status(404).json({ error: '找不到这个接口。' });
 });
 

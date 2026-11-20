@@ -134,6 +134,21 @@ function openDatabase(directory: string): DatabaseSync {
     createdAt TEXT NOT NULL
   ) STRICT;
   CREATE INDEX IF NOT EXISTS due_drafts ON drafts (status, scheduledAt);
+  CREATE TABLE IF NOT EXISTS pending_posts (
+    id TEXT PRIMARY KEY,
+    batchId TEXT NOT NULL,
+    sourceUrl TEXT,
+    text TEXT NOT NULL,
+    variant INTEGER NOT NULL,
+    createdAt TEXT NOT NULL,
+    UNIQUE (batchId, variant)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS pending_post_assignments (
+    pendingPostId TEXT NOT NULL REFERENCES pending_posts(id) ON DELETE CASCADE,
+    accountId TEXT NOT NULL REFERENCES accounts(id),
+    draftId TEXT NOT NULL UNIQUE REFERENCES drafts(id) ON DELETE CASCADE,
+    PRIMARY KEY (pendingPostId, accountId)
+  ) STRICT;
 `);
   const preferenceColumns = [
     ['deviceScaleFactor', 'REAL NOT NULL DEFAULT 1'],

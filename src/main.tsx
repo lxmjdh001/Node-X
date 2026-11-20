@@ -56,6 +56,7 @@ import {
 } from "./browser-region";
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
+import { assignmentModes, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, type AssignmentMode, type PendingPost } from "./post-queue";
 import "./styles.css";
 
 type Account = {
@@ -440,7 +441,13 @@ function App({
     null,
   );
   const [query, setQuery] = useState("");
-  const [draftFilter, setDraftFilter] = useState("all");
+  const [draftFilter, setDraftFilter] = useState("pending");
+  const [pendingPosts, setPendingPosts] = useState<PendingPost[]>([]);
+  const [pendingPostsError, setPendingPostsError] = useState("");
+  const [loadingPosts, setLoadingPosts] = useState(true);
+  const [selectedPostIds, setSelectedPostIds] = useState<string[]>([]);
+  const [postImportOpen, setPostImportOpen] = useState(false);
+  const [postDistribution, setPostDistribution] = useState<PendingPost[] | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const refresh = async (visible = false) => {
     if (visible) setBusy("refresh");
@@ -467,6 +474,22 @@ function App({
       setCamoufoxLoading(false);
     }
   };
+  const refreshPendingPosts = async () => {
+    setLoadingPosts(true);
+    try {
+      const { posts } = await request("/api/pending-posts") as { posts: PendingPost[] };
+      setPendingPosts(posts);
+      setSelectedPostIds((ids) => ids.filter((id) => posts.some((post) => post.id === id)));
+      setPendingPostsError("");
+    } catch (error) {
+      setPendingPostsError((error as Error).message);
+    } finally {
+      setLoadingPosts(false);
+    }
+  };
+  useEffect(() => {
+    if (page === "drafts") void refreshPendingPosts();
+  }, [page]);
   useEffect(() => {
     if (page === "profiles" && showCamoufox) void refreshCamoufox();
   }, [page, showCamoufox]);
@@ -682,7 +705,7 @@ function App({
     overview: ["工作概览", "每个账号，都有清晰的工作环境。"],
     proxies: ["代理网络", "配置 SOCKS5 出口，并检查连接状态。"],
     profiles: ["窗口管理", "在同一个窗口管理 X 账号、SOCKS5 代理和显示设置。"],
-    drafts: ["内容工作室", "从想法到草稿，再由你确认发布。"],
+    drafts: ["内容工作室", "导入 X 或 Facebook 帖子，生成文案，再分配到账号。"],
     settings: ["系统设置", "查看本地服务、AI 模型与 X 接入状态。"],
   }[page];
   function WindowTable({ preview = false }: { preview?: boolean }) {
@@ -1085,9 +1108,17 @@ function App({
                 ? newWindowButton
                 : page === "proxies"
                   ? addButton("proxy", "添加代理")
-                  : page === "drafts"
-                    ? addButton("draft", "新建内容", !data.accounts.length)
-                    : null}
+                  : null}
+              {page === "drafts" && (
+                <>
+                  <Button icon={Pencil} variant="secondary" disabled={!data.accounts.length} onClick={() => setModal({ type: "draft" })}>
+                    手写草稿
+                  </Button>
+                  <Button icon={Plus} variant="primary" onClick={() => setPostImportOpen(true)}>
+                    从帖子生成
+                  </Button>
+                </>
+              )}
             </div>
           </div>
           {fetchError && (
@@ -1592,17 +1623,15 @@ function App({
                         <Icon icon={Sparkles} size={22} />
                       </span>
                       <div>
-                        <h2>写下想法，保留你的判断。</h2>
-                        <p>AI 协助起草，你来编辑并确认发布。</p>
+                        <h2>原文与相似稿</h2>
+                        <p>每批保留一条原文。相似稿暂用示例改写，可分配给不同账号。</p>
                       </div>
                     </div>
                     <div className="studio-connection">
                       <span
                         className={`state-dot ${data.settings.aiConfigured ? "ok" : ""}`}
                       />
-                      {data.settings.aiConfigured
-                        ? "AI 模型已配置"
-                        : "AI 模型尚未配置"}
+                      示例模式
                       <button
                         className="text-button"
                         onClick={() => go("settings")}
@@ -1620,6 +1649,7 @@ function App({
                         aria-label="内容状态"
                       >
                         {[
+                          ["pending", "待发布"],
                           ["all", "全部内容"],
                           ["draft", "草稿"],
                           ["scheduled", "已排程"],
@@ -1636,11 +1666,26 @@ function App({
                             {value === "all" && (
                               <span>{data.drafts.length}</span>
                             )}
+                            {value === "pending" && (
+                              <span>{pendingPosts.length}</span>
+                            )}
                           </button>
                         ))}
                       </div>
                     </div>
-                    {data.drafts.filter(
+                    {draftFilter === "pending" ? (
+                      <PendingPostsPanel
+                        posts={pendingPosts}
+                        selected={selectedPostIds}
+                        accountsAvailable={data.accounts.length > 0}
+                        loading={loadingPosts}
+                        error={pendingPostsError}
+                        onSelection={setSelectedPostIds}
+                        onRetry={refreshPendingPosts}
+                        onImport={() => setPostImportOpen(true)}
+                        onAssign={(posts) => setPostDistribution(posts)}
+                      />
+                    ) : data.drafts.filter(
                       (d) => draftFilter === "all" || d.status === draftFilter,
                     ).length === 0 ? (
                       <Empty
@@ -1964,6 +2009,31 @@ function App({
                   : "配置已添加",
             );
             setModal(null);
+          }}
+        />
+      )}
+      {postImportOpen && (
+        <PostImportDialog
+          onClose={() => setPostImportOpen(false)}
+          onCreated={async (count) => {
+            setPostImportOpen(false);
+            setDraftFilter("pending");
+            await refreshPendingPosts();
+            setToast({ text: `已将 ${count} 条文案加入待发布列表。` });
+          }}
+        />
+      )}
+      {postDistribution && (
+        <PostDistributionDialog
+          posts={postDistribution}
+          accounts={data.accounts}
+          onClose={() => setPostDistribution(null)}
+          onAssigned={async ({ created, existing }) => {
+            setPostDistribution(null);
+            setSelectedPostIds([]);
+            setDraftFilter("draft");
+            await Promise.all([refresh(), refreshPendingPosts()]);
+            setToast({ text: `已创建 ${created} 条发布草稿${existing ? `，跳过 ${existing} 条已分配记录` : ""}。` });
           }}
         />
       )}
@@ -3793,6 +3863,260 @@ function CreateWindowDialog({
           <Button type="submit" variant="primary" busy={pending}>
             创建并打开
           </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+function PostImportDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (count: number) => Promise<void>;
+}) {
+  const [id] = useState(() => crypto.randomUUID());
+  const [url, setUrl] = useState("");
+  const [text, setText] = useState("");
+  const [count, setCount] = useState("3");
+  const [busy, setBusy] = useState<"source" | "generate" | "">("");
+  const [error, setError] = useState("");
+  const number = Number(count);
+  const countValid = Boolean(count) && Number.isInteger(number) && number >= 0 && number <= MAX_VARIANTS;
+
+  async function readLink() {
+    setError("");
+    setBusy("source");
+    try {
+      const source = await request("/api/pending-posts/source", "POST", { url }) as { url: string; text: string };
+      setUrl(source.url);
+      setText(source.text);
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!countValid || (!text.trim() && !url.trim())) return;
+    setError("");
+    setBusy("generate");
+    try {
+      const { count: created } = await request("/api/pending-posts", "POST", {
+        id, text: text || undefined, url: url.trim() || undefined, count: number,
+      }) as { count: number };
+      await onCreated(created);
+    } catch (error) {
+      setError((error as Error).message);
+      setBusy("");
+    }
+  }
+
+  return (
+    <Dialog
+      title="从帖子生成"
+      description="可粘贴 X 或 Facebook 帖子链接，也可直接粘贴正文。"
+      className="dialog-wide"
+      onClose={() => { if (!busy) onClose(); }}
+    >
+      <form onSubmit={submit}>
+        <div className="dialog-body">
+          <div className="post-source-fields">
+            <Field label="帖子链接（可选）" hint="无法读取的帖子可粘贴正文，同时保留来源链接。">
+              <input autoFocus type="text" inputMode="url" maxLength={MAX_POST_LINK} disabled={!!busy}
+                value={url} placeholder="粘贴 X 或 Facebook 帖子链接" onChange={(event) => setUrl(event.target.value)} />
+            </Field>
+            <Button type="button" icon={Link2} disabled={!url.trim() || !!busy} busy={busy === "source"}
+              onClick={() => void readLink()}>
+              读取正文
+            </Button>
+          </div>
+          <Field label="原帖正文">
+            <textarea rows={7} value={text} placeholder="粘贴正文，或先从链接读取" maxLength={MAX_SOURCE_TEXT}
+              disabled={!!busy} onChange={(event) => setText(event.target.value)} />
+          </Field>
+          <Field label="相似稿数量" hint={`可生成 0 到 ${MAX_VARIANTS} 条相似稿。每批另保留 1 条原文。`}>
+            <input type="number" min={0} max={MAX_VARIANTS} step={1} value={count}
+              disabled={!!busy} onChange={(event) => setCount(event.target.value)} required />
+          </Field>
+          <small className="field-hint">示例模式会调整标题和排版，供检查流程。</small>
+          {error && <p className="form-error" role="alert">{error}</p>}
+        </div>
+        <div className="dialog-footer">
+          <Button type="button" onClick={onClose} disabled={!!busy}>取消</Button>
+          <Button type="submit" variant="primary" icon={Sparkles} disabled={!!busy || !countValid || !text.trim() && !url.trim()}
+            busy={busy === "generate"}>
+            {countValid ? `生成 ${number + 1} 条并加入待发布` : "生成并加入待发布"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+function PendingPostsPanel({
+  posts, selected, accountsAvailable, loading, error, onSelection, onRetry, onImport, onAssign,
+}: {
+  posts: PendingPost[];
+  selected: string[];
+  accountsAvailable: boolean;
+  loading: boolean;
+  error: string;
+  onSelection: (ids: string[]) => void;
+  onRetry: () => Promise<void>;
+  onImport: () => void;
+  onAssign: (posts: PendingPost[]) => void;
+}) {
+  if (loading && !posts.length) return <div className="loading-state">正在读取待发布内容…</div>;
+  if (error) return <Empty title="待发布列表读取失败" description={error}
+    action={<Button onClick={() => void onRetry()}>重试</Button>} />;
+  if (!posts.length) return <Empty icon={FileText} title="待发布列表为空"
+    description="导入帖子后，原文和相似稿会出现在这里。"
+    action={<Button icon={Plus} variant="primary" onClick={onImport}>从帖子生成</Button>} />;
+
+  const enabled = selected.length > 0 && accountsAvailable;
+  const selectionLimit = MAX_VARIANTS + 1;
+  return (
+    <>
+      <div className="post-queue-toolbar">
+        <div className="row-actions">
+          <Button type="button" variant="ghost" onClick={() => onSelection(selected.length ? [] : posts.slice(0, selectionLimit).map(post => post.id))}>
+            {selected.length ? "取消选择" : posts.length > selectionLimit ? `选择前 ${selectionLimit} 条` : "全选"}
+          </Button>
+          <small className="subtle" aria-live="polite">已选 {selected.length} 条</small>
+        </div>
+        <div className="row-actions">
+          {!accountsAvailable && <small className="subtle">先添加 X 账号即可分配。</small>}
+          <Button type="button" icon={Send} variant="primary" disabled={!enabled}
+            onClick={() => onAssign(selected.flatMap(id => posts.find(post => post.id === id) ?? []))}>
+            分配发布
+          </Button>
+        </div>
+      </div>
+      <div className="post-queue-list">
+        {posts.map((post, index) => (
+          <article className="post-queue-row" key={post.id}>
+            <input type="checkbox" aria-label={`选择第 ${index + 1} 条待发布内容`}
+              checked={selected.includes(post.id)}
+              disabled={!selected.includes(post.id) && selected.length >= selectionLimit}
+              onChange={(event) => onSelection(event.target.checked ? [...selected, post.id] : selected.filter(id => id !== post.id))} />
+            <div>
+              <div className="post-queue-meta">
+                <Badge tone={post.variant === 0 ? "blue" : "neutral"}>
+                  {post.variant === 0 ? "原文" : `示例改写 ${post.variant}`}
+                </Badge>
+                {post.assignedCount > 0 && <small className="subtle">已分配 {post.assignedCount} 个账号</small>}
+                {post.sourceUrl && <a href={post.sourceUrl} target="_blank" rel="noreferrer" className="text-button">
+                  原帖 <Icon icon={ExternalLink} size={13} />
+                </a>}
+              </div>
+              <p className="post-queue-text">{post.text}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function PostDistributionDialog({
+  posts, accounts, onClose, onAssigned,
+}: {
+  posts: PendingPost[];
+  accounts: Account[];
+  onClose: () => void;
+  onAssigned: (result: { created: number; existing: number }) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<AssignmentMode>("oneAccount");
+  const [single, setSingle] = useState("");
+  const [multi, setMulti] = useState<string[]>([]);
+  const [paired, setPaired] = useState<string[]>(() => posts.map(() => ""));
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const accountIds = mode === "oneAccount" ? (single ? [single] : []) : mode === "samePost" ? multi : paired;
+  const valid = mode === "oneAccount" ? Boolean(single) : mode === "samePost" ? multi.length >= 2 : paired.every(Boolean);
+
+  const accountLabel = (account: Account) => account.username ? `${account.label} · @${account.username}` : account.label;
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!valid) return;
+    setError("");
+    setSaving(true);
+    try {
+      await onAssigned(await request("/api/pending-posts/assign", "POST", {
+        mode, postIds: posts.map(post => post.id), accountIds,
+      }));
+    } catch (error) {
+      setSaving(false);
+      setError((error as Error).message);
+    }
+  }
+
+  return (
+    <Dialog title="分配发布" description={`已选 ${posts.length} 条文案。确认后会为目标账号创建发布草稿。`}
+      className="dialog-wide" onClose={() => { if (!saving) onClose(); }}>
+      <form onSubmit={submit}>
+        <div className="dialog-body">
+          <fieldset className="post-distribution" disabled={saving}>
+            <legend>分配方式</legend>
+            <div className="post-distribution-options">
+              {(Object.keys(assignmentModes) as AssignmentMode[]).map((value) => {
+                const disabled = value === "samePost" ? posts.length !== 1 || accounts.length < 2
+                  : value === "oneEach" ? posts.length < 2 || posts.length > accounts.length : false;
+                return (
+                  <label key={value}>
+                    <input type="radio" name="assignment" value={value} disabled={disabled}
+                      checked={mode === value} onChange={() => setMode(value)} />
+                    {assignmentModes[value]}
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+          {mode === "oneAccount" && (
+            <Field label="目标 X 账号">
+              <select value={single} onChange={(event) => setSingle(event.target.value)} disabled={saving} required>
+                <option value="">选择账号</option>
+                {accounts.map(account => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}
+              </select>
+            </Field>
+          )}
+          {mode === "samePost" && (
+            <fieldset className="post-distribution post-account-list" disabled={saving}>
+              <legend>目标 X 账号（至少选两个）</legend>
+              {accounts.map(account => (
+                <label key={account.id}>
+                  <input type="checkbox" checked={multi.includes(account.id)}
+                    disabled={!multi.includes(account.id) && multi.length >= MAX_VARIANTS + 1}
+                    onChange={(event) => setMulti(event.target.checked ? [...multi, account.id] : multi.filter(id => id !== account.id))} />
+                  {accountLabel(account)}
+                </label>
+              ))}
+            </fieldset>
+          )}
+          {mode === "oneEach" && (
+            <div className="post-account-list">
+              {posts.map((post, index) => (
+                <Field key={post.id} label={`文案 ${index + 1}的目标账号`} hint={post.text.slice(0, 120)}>
+                  <select value={paired[index]} required disabled={saving}
+                    onChange={(event) => setPaired(paired.map((id, i) => i === index ? event.target.value : id))}>
+                    <option value="">选择账号</option>
+                    {accounts.map(account => <option key={account.id} value={account.id}
+                      disabled={paired.some((id, i) => i !== index && id === account.id)}>{accountLabel(account)}</option>)}
+                  </select>
+                </Field>
+              ))}
+            </div>
+          )}
+          {error && <p className="form-error" role="alert">{error}</p>}
+        </div>
+        <div className="dialog-footer">
+          <Button type="button" onClick={onClose} disabled={saving}>取消</Button>
+          <Button type="submit" variant="primary" icon={Send} disabled={!valid || saving} busy={saving}>创建发布草稿</Button>
         </div>
       </form>
     </Dialog>

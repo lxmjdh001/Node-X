@@ -3821,3 +3821,73 @@ td strong {
     min-height: 44px;
   }
 }
+
+.post-source-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.post-source-fields > .button {
+  margin-top: 23px;
+}
+
+.post-queue-toolbar,
+.post-queue-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.post-queue-toolbar {
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.post-queue-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.post-queue-row:last-child { border-bottom: 0; }
+
+.post-queue-row > input { margin-top: 4px; }
+
+.post-queue-text {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+
+.post-distribution {
+  padding: 0;
+  margin: 0 0 16px;
+  border: 0;
+}
+
+.post-distribution legend {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.post-distribution-options,
+.post-account-list {
+  display: grid;
+  gap: 10px;
+}
+
+.post-distribution label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.post-distribution label:has(input:disabled) { opacity: .6; }

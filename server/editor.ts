@@ -24,7 +24,7 @@ type Draft = { id: string; accountId: string; text: string; status: string };
 
 const draftById = (id: string) => requireFound(row<Draft>('SELECT * FROM drafts WHERE id = ?', id), '找不到这条草稿。');
 
-function addDraft(accountId: string, prompt: string, text: string) {
+export function addDraft(accountId: string, prompt: string, text: string) {
   const id = randomUUID();
   write('INSERT INTO drafts (id, accountId, prompt, text, createdAt) VALUES (?, ?, ?, ?, ?)',
     id, accountId, prompt, text, new Date().toISOString());
