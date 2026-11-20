@@ -41,7 +41,7 @@ export async function openMacChrome(directory: string, size: { width: number; he
   try {
     if (await chromePid(directory)) throw new Error('请先退出之前打开的独立 Chrome 窗口。');
     const hasProfile = await access(join(directory, 'Default', 'Preferences')).then(() => true, () => false);
-    const bridge = await createBridge(proxy, null, true);
+    const bridge = await createBridge(proxy, null, false);
     const env: NodeJS.ProcessEnv = { ...process.env, HOME: userInfo().homedir };
     delete env.CFFIXED_USER_HOME;
     const openArgs = [

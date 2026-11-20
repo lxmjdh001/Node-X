@@ -16,7 +16,7 @@ npm run dev
 
 ## 客户本机 Chrome 启动器
 
-Mac 客户从窗口管理下载启动器，按安装包里的说明安装并在 Chrome 加载扩展。此版本需要 macOS、Google Chrome 和 Node.js 22 或更新版本。首次打开 X 时手动登录。以后使用同一窗口时，Chrome 读取该客户空间和窗口在本机保存的会话。每个窗口使用绑定的 SOCKS5，浏览器语言、时区和显示偏好沿用本机设置。
+Mac 客户从窗口管理下载启动器，按安装包里的说明安装并在 Chrome 加载扩展。此版本需要 macOS、Google Chrome 和 Node.js 22 或更新版本。首次打开 X 时手动登录。以后使用同一窗口时，Chrome 读取该客户空间和窗口在本机保存的会话。窗口的 HTTPS 访问通过绑定的 SOCKS5 转发，包含 X 和 Google 登录涉及的地区域名。浏览器语言、时区和显示偏好沿用本机设置。
 
 在部署机器构建工作台后运行 `npm run launcher:build`，将生成的 `dist/node-x-mac.zip` 随网站发布。前台地址为 `https://xai.chuhai7.com` 时，可用 `NODEX_CLIENT_LAUNCHER=1` 启用客户本机模式。本机验收用 `npm run launcher:build -- --preview`，工作台监听 `127.0.0.1:4283`，并启用同一个环境变量。预览和线上启动器使用独立的数据目录。
 
