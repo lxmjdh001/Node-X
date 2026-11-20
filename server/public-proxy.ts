@@ -48,8 +48,10 @@ export async function publicProxy(proxy: ProxySettings): Promise<ProxySettings> 
 
 const X_HOSTS = ['x.com', 'twitter.com', 'twimg.com', 't.co', 'arkoselabs.com', 'funcaptcha.com',
   'accounts.google.com', 'gstatic.com', 'appleid.apple.com', 'cdn-apple.com'];
+const GOOGLE_JAPAN_SIGN_IN = 'accounts.google.co.jp';
 
 export function allowedBrowserTarget(host: string, port: number): boolean {
   host = host.toLowerCase().replace(/\.$/, '');
-  return (port === 443 || port === 80) && X_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+  return (port === 443 || port === 80) &&
+    (host === GOOGLE_JAPAN_SIGN_IN || X_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`)));
 }
