@@ -9,7 +9,11 @@ import { launcherConfig, launchPayload, ticketPattern } from './protocol.js';
 const preview = process.argv.includes('--preview');
 const origin = preview ? launcherConfig.previewOrigin : launcherConfig.origin;
 const root = join(homedir(), 'Library', 'Application Support', 'Node X Launcher', preview ? 'preview' : 'production');
-const sessions = new Map<string, { version: string; chrome: Awaited<ReturnType<typeof openMacChrome>> }>();
+const sessions = new Map<string, {
+  version: string;
+  chrome: Awaited<ReturnType<typeof openMacChrome>>;
+  closed: Promise<void>;
+}>();
 const starting = new Map<string, Promise<string>>();
 const maxMessageSize = 4096;
 let buffer = Buffer.alloc(0);
@@ -25,6 +29,35 @@ function send(reply: { id: string; success: boolean; message: string }) {
 
 class LaunchError extends Error {}
 
+function reportPresence(token: string | undefined) {
+  if (!token) return { ready: Promise.resolve(), stop: () => Promise.resolve() };
+  const endpoint = new URL('/api/launcher/heartbeat', origin);
+  let pending = Promise.resolve();
+  function send(running: boolean) {
+    pending = pending.then(async () => {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, running }),
+        redirect: 'error',
+        signal: AbortSignal.timeout(4000),
+      });
+      await response.body?.cancel();
+    }).catch(() => undefined);
+    return pending;
+  }
+  const ready = send(true);
+  const timer = setInterval(() => { void send(true); }, 15_000);
+  timer.unref();
+  return {
+    ready,
+    stop: () => {
+      clearInterval(timer);
+      return send(false);
+    },
+  };
+}
+
 async function launch(ticket: string): Promise<string> {
   const response = await fetch(new URL('/api/launcher/redeem', origin), {
     method: 'POST',
@@ -39,7 +72,7 @@ async function launch(ticket: string): Promise<string> {
   }
   const result = launchPayload.safeParse(await response.json());
   if (!result.success) throw new LaunchError('工作台返回的窗口配置无效。');
-  const { workspace, profile, proxy, width, height } = result.data;
+  const { workspace, profile, proxy, width, height, presenceToken } = result.data;
   const directory = join(root, workspace, profile);
   const version = createHash('sha256').update(JSON.stringify({ proxy, width, height })).digest('hex');
   const active = starting.get(directory);
@@ -56,11 +89,14 @@ async function launch(ticket: string): Promise<string> {
     if (closing) throw new LaunchError('启动器已关闭，请重新打开工作台。');
     if (running) await running.chrome.close();
     const chrome = await openMacChrome(directory, { width, height }, upstream);
-    const session = { version, chrome };
-    sessions.set(directory, session);
-    void chrome.closed.then(() => {
+    const heartbeat = reportPresence(presenceToken);
+    const closed = chrome.closed.then(async () => {
       if (sessions.get(directory) === session) sessions.delete(directory);
+      await heartbeat.stop();
     });
+    const session = { version, chrome, closed };
+    sessions.set(directory, session);
+    await heartbeat.ready;
     return '已在本机打开 Chrome。';
   })();
   starting.set(directory, start);
@@ -98,7 +134,10 @@ async function shutdown() {
   closing = true;
   process.stdin.pause();
   await Promise.allSettled(starting.values());
-  await Promise.allSettled([...sessions.values()].map(session => session.chrome.close()));
+  await Promise.allSettled([...sessions.values()].map(async (session) => {
+    await session.chrome.close();
+    await session.closed;
+  }));
   process.exit(0);
 }
 

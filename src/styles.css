@@ -2760,6 +2760,10 @@ td strong {
   min-height: 44px;
   margin-top: 10px;
 }
+.launcher-status {
+  min-width: 84px;
+  white-space: nowrap;
+}
 .engine-command {
   display: block;
   width: fit-content;

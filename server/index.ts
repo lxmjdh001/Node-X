@@ -13,6 +13,7 @@ import { editor } from './editor.js';
 import { InputError } from './errors.js';
 import { imports } from './imports.js';
 import { clientLauncher, redeemLauncherTicket } from './launcher.js';
+import { reapLauncherPresence, reportLauncherPresence } from './launcher-presence.js';
 import { recoverPublishQueue, runPublishQueue, waitForPublisher } from './publisher.js';
 import { closeDatabases } from './store.js';
 import { launcherProfile, workspace } from './workspace.js';
@@ -103,6 +104,9 @@ function sameOrigin(expected: (host: string) => string, allowOAuth = false): Req
 app.use('/api', sameOrigin((host) => external?.origin || `http://${host}`, true));
 app.post('/api/launcher/redeem', express.json({ limit: '1kb' }),
   (req, res) => redeemLauncherTicket(req, res, launcherProfile));
+if (clientLauncher) {
+  app.post('/api/launcher/heartbeat', express.json({ limit: '1kb' }), reportLauncherPresence);
+}
 app.use('/api/auth', express.json({ limit: '8kb' }));
 app.use('/api', auth);
 app.use('/api', requireAuth);
@@ -200,6 +204,7 @@ runPublishQueue();
 queue = setInterval(() => {
   runPublishQueue();
   reapBrowsers();
+  reapLauncherPresence();
 }, 2000);
 console.log(`Node X 工作台 ${external?.origin || `http://127.0.0.1:${port}`}`);
 console.log(`Node X 登录码管理 ${operatorExternal?.origin || `http://${operatorHost}`}/operator`);

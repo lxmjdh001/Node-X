@@ -20,6 +20,8 @@ Mac 客户从窗口管理下载启动器，按安装包里的说明安装并在 
 
 在部署机器构建工作台后运行 `npm run launcher:build`，将生成的 `dist/node-x-mac.zip` 随网站发布。前台地址为 `https://xai.chuhai7.com` 时，可用 `NODEX_CLIENT_LAUNCHER=1` 启用客户本机模式。本机验收用 `npm run launcher:build -- --preview`，工作台监听 `127.0.0.1:4283`，并启用同一个环境变量。预览和线上启动器使用独立的数据目录。
 
+窗口管理的「本机在线」由启动器上报。运行时每 15 秒发送一次心跳，退出后上报离线，断开连接后约 45 秒显示离线。这个字段监测 Chrome 进程的运行状态。
+
 ## 登录和设备登记
 
 工作台需要登录码。开发环境的生成页是 `http://127.0.0.1:4174/operator`。部署环境可经 HTTPS 公开生成页，生产地址是 `https://xai.chuhai7.com/operator`，入口检查 Mac Chrome。

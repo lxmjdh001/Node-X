@@ -9,6 +9,7 @@ import { managerPort } from './camoufox-client.js';
 import { contentStatus } from './content.js';
 import { InputError, requireFound } from './errors.js';
 import { clientLauncher, issueLauncherTicket, launcherDownload, launcherExtensionId } from './launcher.js';
+import { launcherPresence } from './launcher-presence.js';
 import { publicProxy } from './public-proxy.js';
 import { isCustomerWorkspace, workspaceDb, workspaceDirectory, workspaceId, reveal, row, rows, seal, write } from './store.js';
 
@@ -125,7 +126,10 @@ export function createProfile(data: z.output<typeof profileInput>, id: string = 
 
 function profileStatus(profile: Profile) {
   const version = browserVersion(profile.id);
-  return { ...profile, running: Boolean(version), version };
+  return {
+    ...profile, running: Boolean(version), version,
+    ...(clientLauncher ? { localPresence: launcherPresence(profile.id) } : {}),
+  };
 }
 
 function ensureProxyFree(id: string) {

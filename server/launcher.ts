@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { launcherConfig, ticketPattern } from '../launcher/protocol.js';
 import { sessionHasAccess } from './auth.js';
 import { InputError } from './errors.js';
+import { createPresenceToken } from './launcher-presence.js';
 import { runInWorkspace, workspaceId } from './store.js';
 
 type Ticket = {
@@ -34,7 +35,7 @@ export function issueLauncherTicket(req: Request, res: Response, profile: string
   res.json({ ticket: token });
 }
 
-export function redeemLauncherTicket(req: Request, res: Response, resolveProfile: (id: string) => unknown) {
+export function redeemLauncherTicket(req: Request, res: Response, resolveProfile: (id: string) => object) {
   if (!clientLauncher) throw new InputError('本机启动器未启用。', 404);
   const { ticket } = req.body ?? {};
   if (typeof ticket !== 'string' || !ticketPattern.test(ticket)) throw new InputError('启动凭证无效。', 400);
@@ -43,5 +44,6 @@ export function redeemLauncherTicket(req: Request, res: Response, resolveProfile
   if (!issued || issued.expires <= Date.now() || !issued.authorized()) {
     throw new InputError('启动凭证已失效，请回到工作台重新打开。', 401);
   }
-  res.json(runInWorkspace(issued.workspace, () => resolveProfile(issued.profile)));
+  const settings = runInWorkspace(issued.workspace, () => resolveProfile(issued.profile));
+  res.json({ ...settings, presenceToken: createPresenceToken(issued.workspace, issued.profile) });
 }

@@ -94,6 +94,7 @@ type Profile = {
   reducedMotion: "no-preference" | "reduce";
   running: boolean;
   version: string | null;
+  localPresence?: { running: boolean; lastSeen: string } | null;
 };
 type Draft = {
   id: string;
@@ -556,6 +557,7 @@ function App({
           request(`/api/profiles/${profile.id}/launcher-ticket`, "POST", {}),
         );
         setToast({ text: message });
+        void refresh();
         return true;
       } catch (error) {
         setToast({ text: (error as Error).message, error: true });
@@ -709,12 +711,16 @@ function App({
               <th>SOCKS5 代理</th>
               {!preview && <th>窗口指纹</th>}
               <th>状态</th>
+              {clientLauncher && !preview && (
+                <th className="launcher-status" title="启动器报告的 Chrome 运行状态">本机在线</th>
+              )}
               <th className="align-right">操作</th>
             </tr>
           </thead>
           <tbody>
             {list.map(({ account, profile, proxy }) => {
               const handle = account.xUsername || account.username;
+              const presence = profile?.localPresence;
               return (
                 <tr key={account.id}>
                   <td>
@@ -772,7 +778,7 @@ function App({
                     <Badge tone={profile?.running ? "green" : "neutral"}>
                       {profile
                         ? clientLauncher
-                          ? "在本机查看"
+                          ? preview ? "在本机查看" : "已配置"
                           : profile.running
                           ? "运行中"
                           : "已关闭"
@@ -784,6 +790,15 @@ function App({
                       </small>
                     )}
                   </td>
+                  {clientLauncher && !preview && (
+                    <td className="launcher-status" title={presence ? `最近上报 ${date(presence.lastSeen)}` : undefined}>
+                      {profile ? (
+                        <Badge tone={presence?.running ? "green" : "neutral"}>
+                          {presence ? (presence.running ? "运行中" : "已离线") : "未检测"}
+                        </Badge>
+                      ) : "—"}
+                    </td>
+                  )}
                   <td>
                     <div className="row-actions">
                       {profile ? (
