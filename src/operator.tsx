@@ -11,7 +11,9 @@ import {
   LogOut,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react";
+import { ModelPage } from "./models-page";
 
 type OperatorState = {
   enrolled: boolean;
@@ -65,9 +67,9 @@ class OperatorRequestError extends Error {
   }
 }
 
-async function operatorRequest<T>(path: string, body?: unknown): Promise<T> {
+async function operatorRequest<T>(path: string, body?: unknown, method = body === undefined ? "GET" : "POST"): Promise<T> {
   const response = await fetch(`/operator/api/${path}`, {
-    method: body === undefined ? "GET" : "POST",
+    method,
     cache: "no-store",
     credentials: "same-origin",
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
@@ -326,6 +328,7 @@ function RenewLicenseDialog({
 
 export default function OperatorApp() {
   const [state, setState] = useState<OperatorState | null>(null);
+  const [section, setSection] = useState<"codes" | "models">("codes");
   const [key, setKey] = useState<BrowserKey | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<
@@ -402,10 +405,12 @@ export default function OperatorApp() {
     !!state?.enrolled && state.passwordConfigured && !!key && !loading;
   const sessionExpiresAt = state?.sessionExpiresAt ?? null;
   const authenticated = !!key && sessionExpiresAt !== null;
+  const showModels = authenticated && section === "models";
 
   function endSession() {
     setState((current) => current && { ...current, sessionExpiresAt: null });
     setPassword("");
+    setSection("codes");
     setLicenses(null);
     setCode(null);
     setRenewal(null);
@@ -413,9 +418,9 @@ export default function OperatorApp() {
     setNotice("");
   }
 
-  async function manage<T>(path: string, details: Record<string, unknown>) {
+  async function manage<T>(path: string, details?: unknown, method?: string) {
     try {
-      return await operatorRequest<T>(path, details);
+      return await operatorRequest<T>(path, details, method);
     } catch (err) {
       if (err instanceof OperatorRequestError && err.status === 401) {
         endSession();
@@ -584,10 +589,10 @@ export default function OperatorApp() {
       <main className="operator-main">
         <div className="operator-heading">
           <span className="access-symbol">
-            <KeyRound size={26} strokeWidth={1.7} aria-hidden="true" />
+            {showModels ? <Sparkles size={26} strokeWidth={1.7} aria-hidden="true" /> : <KeyRound size={26} strokeWidth={1.7} aria-hidden="true" />}
           </span>
           <div>
-            <h1>{authenticated ? "登录码管理" : "登录管理后台"}</h1>
+            <h1>{showModels ? "全局模型管理" : authenticated ? "登录码管理" : "登录管理后台"}</h1>
           </div>
           {authenticated ? (
             <OperatorButton
@@ -611,6 +616,17 @@ export default function OperatorApp() {
             </OperatorButton>
           )}
         </div>
+        {authenticated && (
+          <nav className="operator-sections" aria-label="后台功能">
+            <OperatorButton className={showModels ? "secondary" : "primary"} aria-pressed={!showModels}
+              onClick={() => setSection("codes")}>登录码管理</OperatorButton>
+            <OperatorButton className={showModels ? "primary" : "secondary"} aria-pressed={showModels}
+              onClick={() => setSection("models")}>全局模型管理</OperatorButton>
+          </nav>
+        )}
+        {showModels ? (
+          <ModelPage global requestModel={(path, method, body) => manage(path.slice(1), body, method)} />
+        ) : (
         <div className="operator-grid">
           <section className="operator-status-card panel">
             <div className="operator-section-heading">
@@ -924,7 +940,8 @@ export default function OperatorApp() {
             </div>
           </section>
         </div>
-        {authenticated && code && (
+        )}
+        {authenticated && !showModels && code && (
           <section
             className={`operator-code-card panel ${codeStatus === "expired" ? "expired" : ""}`}
             tabIndex={-1}
@@ -976,7 +993,7 @@ export default function OperatorApp() {
             </p>
           </section>
         )}
-        {authenticated && (
+        {authenticated && !showModels && (
           <section
             className="operator-code-card operator-license-list panel"
             aria-labelledby="license-list-title"
@@ -1130,7 +1147,7 @@ export default function OperatorApp() {
             )}
           </section>
         )}
-        {authenticated && renewal && (
+        {authenticated && !showModels && renewal && (
           <RenewLicenseDialog
             license={renewal.entry}
             busy={pending === "renew"}

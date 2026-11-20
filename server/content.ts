@@ -1,6 +1,6 @@
 import twitterText from 'twitter-text';
 import { ApiResponseError, TwitterApi, type AccessOAuth2TokenResult, type TweetV2PostTweetResult } from 'twitter-api-v2';
-import { legacyWritingAvailable, modelDefault, requiredModel, runModel } from './models.js';
+import { modelAvailable, requiredModel, runModel } from './models.js';
 
 export type XToken = {
   accessToken: string;
@@ -49,8 +49,8 @@ function xConfigured() {
 
 export function contentStatus(): { aiConfigured: boolean; publishAiConfigured: boolean; xConfigured: boolean } {
   return {
-    aiConfigured: Boolean(modelDefault('writing') || legacyWritingAvailable()),
-    publishAiConfigured: Boolean(modelDefault('publishing')),
+    aiConfigured: modelAvailable('writing'),
+    publishAiConfigured: modelAvailable('publishing'),
     xConfigured: xConfigured(),
   };
 }

@@ -57,7 +57,8 @@ import {
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
 import { assignmentModes, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, type AssignmentMode, type PendingPost } from "./post-queue";
-import { modelProviders, type ModelProviderId, type ModelPurpose, type ModelSettings, type WorkspaceModel } from "./model-catalog";
+import { ModelPage } from "./models-page";
+import { Icon, Button, IconButton, Dialog, Field } from "./ui";
 import "./styles.css";
 
 type Account = {
@@ -232,19 +233,6 @@ function date(value: string | null) {
       })
     : "—";
 }
-function Icon({
-  icon: Component,
-  size = 18,
-  ...props
-}: {
-  icon: typeof Users;
-  size?: number;
-  className?: string;
-}) {
-  return (
-    <Component size={size} strokeWidth={1.7} aria-hidden="true" {...props} />
-  );
-}
 function Badge({
   tone = "neutral",
   children,
@@ -281,126 +269,6 @@ function Empty({
     </div>
   );
 }
-function Button({
-  children,
-  icon,
-  variant = "secondary",
-  className = "",
-  busy = false,
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
-  icon?: typeof Users;
-  variant?: "primary" | "secondary" | "ghost" | "danger";
-  busy?: boolean;
-}) {
-  return (
-    <button
-      className={`button ${variant} ${className}`}
-      {...props}
-      disabled={props.disabled || busy}
-    >
-      {busy ? (
-        <Icon icon={LoaderCircle} className="spin" />
-      ) : icon ? (
-        <Icon icon={icon} size={16} />
-      ) : null}
-      {children}
-    </button>
-  );
-}
-function IconButton({
-  label,
-  icon,
-  className = "",
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
-  label: string;
-  icon: typeof Users;
-}) {
-  return (
-    <button
-      className={`icon-button ${className}`}
-      title={label}
-      aria-label={label}
-      {...props}
-    >
-      <Icon icon={icon} size={17} />
-    </button>
-  );
-}
-function Dialog({
-  title,
-  description,
-  children,
-  onClose,
-  className = "",
-}: {
-  title: string;
-  description?: string;
-  children: ReactNode;
-  onClose: () => void;
-  className?: string;
-}) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement;
-    ref.current?.showModal();
-    return () => {
-      requestAnimationFrame(() => previous?.focus());
-    };
-  }, []);
-  return (
-    <dialog
-      ref={ref}
-      className={`dialog ${className}`}
-      onCancel={(event) => {
-        event.preventDefault();
-        onClose();
-      }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) {
-          const box = event.currentTarget.getBoundingClientRect();
-          if (
-            event.clientX < box.left ||
-            event.clientX > box.right ||
-            event.clientY < box.top ||
-            event.clientY > box.bottom
-          )
-            onClose();
-        }
-      }}
-    >
-      <div className="dialog-head">
-        <div>
-          <h2>{title}</h2>
-          {description && <p>{description}</p>}
-        </div>
-        <IconButton icon={X} label="关闭" onClick={onClose} />
-      </div>
-      {children}
-    </dialog>
-  );
-}
-function Field({
-  label,
-  hint,
-  children,
-  className = "",
-}: {
-  label: string;
-  hint?: string;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <label className={`field ${className}`}>
-      <span>{label}</span>
-      {children}
-      {hint && <small>{hint}</small>}
-    </label>
-  );
-}
-
 function workbenchPage(): Page {
   const requested = location.hash.slice(1);
   if (requested === "accounts") return "profiles";
@@ -1871,7 +1739,7 @@ function App({
                   </p>
                 </>
               )}
-              {page === "models" && <ModelPage onChange={() => refresh()} />}
+              {page === "models" && <ModelPage requestModel={(path, method, body) => request("/api" + path, method, body)} onChange={() => refresh()} />}
               {page === "settings" && (
                 <div className="settings-grid">
                   <section className="panel settings-section">
@@ -4124,186 +3992,6 @@ function PostDistributionDialog({
         <div className="dialog-footer">
           <Button type="button" onClick={onClose} disabled={saving}>取消</Button>
           <Button type="submit" variant="primary" icon={Send} disabled={!valid || saving} busy={saving}>创建发布草稿</Button>
-        </div>
-      </form>
-    </Dialog>
-  );
-}
-
-function ModelPage({ onChange }: { onChange: () => Promise<void> }) {
-  const [data, setData] = useState<ModelSettings | null>(null);
-  const [open, setOpen] = useState<WorkspaceModel | "new" | null>(null);
-  const [deleting, setDeleting] = useState<WorkspaceModel | null>(null);
-  const [busy, setBusy] = useState("");
-  const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
-
-  async function load() {
-    setMessage(null);
-    try {
-      setData(await request("/api/models"));
-    } catch (error) {
-      setMessage({ text: (error as Error).message, error: true });
-    }
-  }
-
-  useEffect(() => { void load(); }, []);
-
-  async function update(path: string, method: string, body: unknown, success: string) {
-    setBusy(path);
-    setMessage(null);
-    try {
-      const next = await request(path, method, body);
-      if (path.endsWith("/test")) {
-        setMessage({ text: success });
-        return;
-      }
-      setData(next);
-      setDeleting(null);
-      setMessage({ text: success });
-      await onChange();
-    } catch (error) {
-      setMessage({ text: (error as Error).message, error: true });
-    } finally {
-      setBusy("");
-    }
-  }
-
-  function defaultField(purpose: ModelPurpose, label: string, hint: string) {
-    return (
-      <Field label={label} hint={hint}>
-        <select value={data?.defaults[purpose] ?? ""} disabled={!data?.models.length || !!busy}
-          onChange={(event) => void update("/api/models-defaults", "PATCH", {
-            purpose, modelId: event.target.value || null,
-          }, "默认模型已更新。")}>
-          <option value="">{purpose === "writing" && data?.legacyWriting ? "服务器默认模型" : "未设置"}</option>
-          {data?.models.map(model => <option value={model.id} key={model.id}>{modelProviders[model.provider].name} · {model.model}</option>)}
-        </select>
-      </Field>
-    );
-  }
-
-  return (
-    <div className="model-page">
-      <section className="panel model-panel">
-        <h2>默认模型</h2>
-        <div className="model-defaults">
-          {defaultField("writing", "写作模型", "用于生成草稿和相似稿。")}
-          {defaultField("publishing", "发布审核模型", "在草稿里点击「AI 审核」时检查正文并给出建议。")}
-        </div>
-      </section>
-      <section className="panel model-panel">
-        <div className="model-list-heading">
-          <h2>已添加的模型</h2>
-          <Button icon={Plus} variant="primary" disabled={!data || !!busy} onClick={() => setOpen("new")}>添加模型</Button>
-        </div>
-        {message && <p role={message.error ? "alert" : "status"}
-          className={message.error ? "form-error" : "model-feedback"}>{message.text}</p>}
-        {!data ? (message?.error ? <Button onClick={() => void load()}>重试</Button> : <p role="status">正在读取模型配置…</p>) :
-          data.models.length === 0 ? <p className="subtle">添加一个模型后，即可将它设为默认模型。</p> : (
-            <ul className="model-list">
-              {data.models.map(model => {
-                const testPath = `/api/models/${model.id}/test`;
-                return (
-                  <li key={model.id}>
-                    <div className="model-name">
-                      <strong>{modelProviders[model.provider].name}</strong>
-                      <code>{model.model}</code>
-                    </div>
-                    <div className="row-actions">
-                      <Button busy={busy === testPath} disabled={!!busy}
-                        onClick={() => void update(testPath, "POST", {}, `${model.model} 连接成功。`)}>测试连接</Button>
-                      <Button icon={Pencil} variant="ghost" disabled={!!busy} onClick={() => setOpen(model)}>编辑</Button>
-                      <IconButton icon={Trash2} label={`删除 ${model.model}`} disabled={!!busy} onClick={() => setDeleting(model)} />
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-      </section>
-      {open && <ModelForm item={open === "new" ? undefined : open} onClose={() => setOpen(null)} onSaved={async next => {
-        setData(next);
-        setOpen(null);
-        setMessage({ text: "模型已保存。" });
-        await onChange();
-      }} />}
-      {deleting && (
-        <Dialog title="删除模型" description={`删除 ${deleting.model} 及其 API Key。使用此模型的默认项也会清除。`}
-          onClose={() => { if (!busy) setDeleting(null); }}>
-          <div className="dialog-footer">
-            <Button disabled={!!busy} onClick={() => setDeleting(null)}>取消</Button>
-            <Button variant="danger" busy={!!busy} disabled={!!busy}
-              onClick={() => void update(`/api/models/${deleting.id}`, "DELETE", undefined, "模型已删除。")}>删除模型</Button>
-          </div>
-          {message?.error && <p className="form-error" role="alert">{message.text}</p>}
-        </Dialog>
-      )}
-    </div>
-  );
-}
-
-function ModelForm({ item, onClose, onSaved }: {
-  item?: WorkspaceModel;
-  onClose: () => void;
-  onSaved: (data: ModelSettings) => Promise<void>;
-}) {
-  const [provider, setProvider] = useState<ModelProviderId>(item?.provider ?? "openai");
-  const [model, setModel] = useState(item?.model ?? modelProviders.openai.models[0]);
-  const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const entry = modelProviders[provider];
-
-  async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      const next = await request(item ? `/api/models/${item.id}` : "/api/models", item ? "PATCH" : "POST", {
-        provider, model, apiKey: key.trim() || undefined,
-      });
-      await onSaved(next);
-    } catch (error) {
-      setError((error as Error).message);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog title={item ? "编辑模型" : "添加模型"} onClose={() => { if (!busy) onClose(); }}>
-      <form onSubmit={save}>
-        <div className="dialog-body">
-          <Field label="服务商">
-            <select autoFocus={!item} disabled={!!item || busy} value={provider} onChange={event => {
-              const next = event.target.value as ModelProviderId;
-              setProvider(next);
-              setModel(modelProviders[next].models[0] ?? "");
-              setKey("");
-            }}>
-              {Object.entries(modelProviders).map(([id, value]) => <option key={id} value={id}>{value.name}</option>)}
-            </select>
-          </Field>
-          {entry.models.length > 0 && (
-            <Field label="预设模型">
-              <select disabled={busy} value={entry.models.includes(model) ? model : ""} onChange={event => setModel(event.target.value)}>
-                <option value="">手动填写</option>
-                {entry.models.map(id => <option key={id} value={id}>{id}</option>)}
-              </select>
-            </Field>
-          )}
-          <Field label="模型 ID" hint={provider === "doubao" ? "可填写火山方舟控制台中的模型 ID 或推理接入点 ID（ep-…）。" : undefined}>
-            <input required maxLength={180} disabled={busy} value={model} spellCheck={false} onChange={event => setModel(event.target.value)} />
-          </Field>
-          <Field label="API Key" hint={item ? "留空可保留已保存的 API Key。" : "API Key 加密保存在当前工作空间。"}>
-            <input type="password" autoComplete="new-password" autoFocus={!!item} required={!item}
-              maxLength={2048} disabled={busy} value={key} onChange={event => setKey(event.target.value)} />
-          </Field>
-          {error && <p className="form-error" role="alert">{error}</p>}
-        </div>
-        <div className="dialog-footer">
-          <Button type="button" disabled={busy} onClick={onClose}>取消</Button>
-          <Button type="submit" variant="primary" busy={busy} disabled={busy || !model.trim() || (!item && !key.trim())}>保存模型</Button>
         </div>
       </form>
     </Dialog>

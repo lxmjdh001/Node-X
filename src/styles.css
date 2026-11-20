@@ -3967,3 +3967,13 @@ td strong {
     grid-template-columns: 1fr;
   }
 }
+
+.operator-sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.model-description {
+  margin: 0;
+}

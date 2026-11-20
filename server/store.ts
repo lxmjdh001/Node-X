@@ -155,11 +155,16 @@ function openDatabase(directory: string): DatabaseSync {
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     encryptedKey TEXT NOT NULL,
+    providerWorkspace TEXT,
     UNIQUE (provider, model)
   ) STRICT;
   CREATE TABLE IF NOT EXISTS ai_defaults (
     purpose TEXT PRIMARY KEY CHECK (purpose IN ('writing', 'publishing')),
     modelId TEXT NOT NULL REFERENCES ai_models(id) ON DELETE CASCADE
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS ai_shared_selections (
+    purpose TEXT PRIMARY KEY CHECK (purpose IN ('writing', 'publishing')),
+    modelId TEXT NOT NULL
   ) STRICT;
 `);
   const migrations = [
@@ -167,6 +172,7 @@ function openDatabase(directory: string): DatabaseSync {
     { table: 'profiles', column: 'colorScheme', definition: "TEXT NOT NULL DEFAULT 'light'" },
     { table: 'profiles', column: 'reducedMotion', definition: "TEXT NOT NULL DEFAULT 'no-preference'" },
     { table: 'pending_posts', column: 'generatedBy', definition: 'TEXT' },
+    { table: 'ai_models', column: 'providerWorkspace', definition: 'TEXT' },
   ];
   const missingColumns = () => migrations.filter(({ table, column }) =>
     !db.prepare(`PRAGMA table_info(${table})`).all().some(info => info.name === column));
@@ -187,6 +193,21 @@ function openDatabase(directory: string): DatabaseSync {
 }
 
 export const db = openDatabase(dataDirectory);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS global_ai_models (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    encryptedKey TEXT NOT NULL,
+    providerWorkspace TEXT,
+    UNIQUE (provider, model)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS global_ai_defaults (
+    purpose TEXT PRIMARY KEY CHECK (purpose IN ('writing', 'publishing')),
+    modelId TEXT NOT NULL REFERENCES global_ai_models(id) ON DELETE CASCADE
+  ) STRICT;
+`);
+
 
 export function workspaceDb(): DatabaseSync {
   const id = workspace.getStore();

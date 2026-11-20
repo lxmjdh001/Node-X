@@ -114,7 +114,7 @@ app.use('/api', auth);
 app.use('/api', requireAuth);
 app.use('/api/import', express.json({ limit: '1200kb' }), imports);
 app.use('/api/camoufox', express.json({ limit: '32kb' }), camoufox);
-app.use('/api', express.json({ limit: '32kb' }), workspace, editor, postQueue, modelRoutes, (_req, res) => {
+app.use('/api', express.json({ limit: '32kb' }), workspace, editor, postQueue, modelRoutes('workspace'), (_req, res) => {
   res.status(404).json({ error: '找不到这个接口。' });
 });
 
@@ -141,6 +141,7 @@ operatorApp.use((req, res, next) => {
 });
 operatorApp.use('/operator/api', sameOrigin((host) => host === operatorExternal?.host ? operatorExternal.origin : `http://${host}`), express.json({ limit: '8kb' }));
 operatorApp.use(operatorAuth);
+operatorApp.use('/operator/api', modelRoutes('global'));
 operatorApp.use('/operator/api', (_req, res) => { res.status(404).json({ error: '找不到这个接口。' }); });
 operatorApp.use('/api', (_req, res) => { res.sendStatus(404); });
 
