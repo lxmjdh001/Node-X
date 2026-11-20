@@ -2,8 +2,9 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import twitterText from 'twitter-text';
-import { MAX_BULK_PUBLISH, publishSnapshot } from '../src/publishing.js';
+import { MAX_BULK_PUBLISH, publishSnapshot, type DistributionPublishingMode } from '../src/publishing.js';
 import { MAX_BULK_DELETE_IDS } from '../src/post-queue.js';
+import { browserPublishingTarget, checkBrowserPublishing } from './browser-publishing.js';
 import { beginXAuthorization, ContentError, contentStatus, finishXAuthorization, generateDraft, validatePostText, xAuthorizationMatches } from './content.js';
 import { InputError, requireFound } from './errors.js';
 import { publishable, scheduleWorkspace } from './publisher.js';
@@ -25,14 +26,14 @@ const creationInput = z.object({
 });
 const textInput = z.object({ text: z.string().max(8000, '草稿最多 8000 个字符。') });
 const scheduleInput = z.object({ scheduledAt: z.iso.datetime({ offset: true }).optional() });
-type Draft = { id: string; accountId: string; text: string; status: string };
+type Draft = { id: string; accountId: string; text: string; status: string; publishingMode: DistributionPublishingMode };
 
 const draftById = (id: string) => requireFound(row<Draft>('SELECT * FROM drafts WHERE id = ?', id), '找不到这条草稿。');
 
-export function addDraft(accountId: string, prompt: string, text: string) {
+export function addDraft(accountId: string, prompt: string, text: string, mode: DistributionPublishingMode = 'official') {
   const id = randomUUID();
-  write('INSERT INTO drafts (id, accountId, prompt, text, createdAt) VALUES (?, ?, ?, ?, ?)',
-    id, accountId, prompt, text, new Date().toISOString());
+  write('INSERT INTO drafts (id, accountId, prompt, text, publishingMode, createdAt) VALUES (?, ?, ?, ?, ?, ?)',
+    id, accountId, prompt, text, mode, new Date().toISOString());
   return id;
 }
 
@@ -160,9 +161,9 @@ function publicationTime(scheduledAt?: string) {
   return time.toISOString();
 }
 
-function enqueueDraft(draftId: string, text: string, time: string) {
-  if (!write(`UPDATE drafts SET text = ?, status = 'scheduled', scheduledAt = ?, error = NULL
-    WHERE id = ? AND ${publishable}`, text, time, draftId)) {
+export function enqueueDraft(draftId: string, text: string, time: string, mode: 'official' | 'mcp' = 'official') {
+  if (!write(`UPDATE drafts SET text = ?, publishingMode = ?, status = 'scheduled', scheduledAt = ?, error = NULL
+    WHERE id = ? AND ${publishable}`, text, mode, time, draftId)) {
     throw new InputError('选中的内容已进入队列或无法再次发布，请刷新列表。', 409);
   }
 }
@@ -230,6 +231,21 @@ editor.post('/drafts/:id/publish', (req, res) => {
     throw new InputError('请先为这个账号连接 X。', 409);
   }
   enqueueDraft(draft.id, text, publicationTime(scheduledAt));
+  scheduleWorkspace(workspaceId());
+  res.status(202).json(ok);
+});
+
+editor.post('/drafts/:id/publish-mcp', async (req, res) => {
+  const { confirmedText } = z.object({ confirmedText: z.string().max(8000) }).parse(req.body);
+  const hasAccess = sessionHasAccess(req);
+  await checkBrowserPublishing();
+  if (!hasAccess()) throw new InputError('登录已失效，请重新登录。', 401);
+  const draft = draftById(req.params.id);
+  if (draft.publishingMode !== 'mcp' || draft.text !== confirmedText) {
+    throw new InputError('草稿已变更，请刷新列表并重新确认。', 409);
+  }
+  browserPublishingTarget(accountById(draft.accountId));
+  enqueueDraft(draft.id, validatePostText(draft.text), publicationTime(), 'mcp');
   scheduleWorkspace(workspaceId());
   res.status(202).json(ok);
 });

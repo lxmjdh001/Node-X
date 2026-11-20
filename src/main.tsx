@@ -58,7 +58,7 @@ import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
 import { assignmentModes, MAX_BULK_DELETE_IDS, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, postOutputLanguages, type AssignmentMode, type PendingPost, type PostLayout, type PostOutputLanguage } from "./post-queue";
 import { ModelPage } from "./models-page";
-import { MAX_BULK_PUBLISH, publishSnapshot, type PublishingMethod } from "./publishing";
+import { distributionPublishingModes, MAX_BULK_PUBLISH, publishSnapshot, type AssignmentResult, type DistributionPublishingMode, type PublishingMethod } from "./publishing";
 import { Icon, Button, IconButton, Dialog, Field } from "./ui";
 import "./styles.css";
 
@@ -107,12 +107,14 @@ type Draft = {
   text: string;
   status:
     "draft" | "scheduled" | "publishing" | "published" | "error" | "uncertain";
+  publishingMode?: DistributionPublishingMode;
   scheduledAt: string | null;
   postId: string | null;
   error: string | null;
   createdAt: string;
 };
 type PublishItem = { draft: Draft; account?: Account };
+type ComposerDraft = AssignmentResult["drafts"][number];
 type Workspace = {
   accounts: Account[];
   proxies: Proxy[];
@@ -288,13 +290,18 @@ function App({
   const [page, setPage] = useState<Page>(workbenchPage);
   const [data, setData] = useState<Workspace>(blank);
   const clientLauncher = data.launcherExtensionId;
+  const mcpUnavailable = !data.chromium?.installed || data.macChromeLauncher || clientLauncher
+    ? "需要工作台 Chromium 环境。"
+    : !data.settings.publishAiConfigured ? "请先配置默认发布审核模型。" : "";
   const customer = data.workspaceScope === "customer";
   const showCamoufox =
     data.workspaceScope === "owner" || data.camoufoxConfigured;
   const [viewingBrowser, setViewingBrowser] = useState<{
     profile: Profile;
+    draftId?: string;
     draftText?: string;
   } | null>(null);
+  const [manualPages, setManualPages] = useState<ComposerDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
   const [modal, setModal] = useState<EntityModal | null>(null);
@@ -448,27 +455,31 @@ function App({
   const run = (key: string, path: string, success: string) => {
     void mutate(key, path, "POST", undefined, success).catch(() => {});
   };
-  const openBrowser = async (profile: Profile, draft?: Draft) => {
+  const openBrowser = async (profile: Profile, draft?: ComposerDraft, batch = false) => {
     if (clientLauncher) {
-      setBusy(profile.id);
+      if (!batch) setBusy(profile.id);
       try {
         const message = await launchOnMac(
           clientLauncher,
           () => request(`/api/profiles/${profile.id}/launcher-ticket`, "POST", { draftId: draft?.id }),
           draft ? "open-composer" : "open",
         );
-        setToast({ text: message });
-        void refresh();
+        if (!batch) {
+          setToast({ text: message });
+          void refresh();
+        }
         return true;
       } catch (error) {
-        setToast({ text: (error as Error).message, error: true });
+        if (!batch) setToast({ text: (error as Error).message, error: true });
         return false;
       } finally {
-        setBusy("");
+        if (!batch) setBusy("");
       }
     }
     try {
-      if (!profile.running || draft)
+      if (batch) {
+        await request(`/api/profiles/${profile.id}/start`, "POST", { draftId: draft?.id });
+      } else if (!profile.running || draft) {
         await mutate(
           profile.id,
           `/api/profiles/${profile.id}/start`,
@@ -476,11 +487,35 @@ function App({
           draft ? { draftId: draft.id } : undefined,
           draft ? "已打开 X 发帖页，请核对账号和正文后发布。" : "浏览器环境已打开",
         );
-      if (data.remoteBrowser) setViewingBrowser({ profile, draftText: draft?.text });
+      }
+      if (data.remoteBrowser) setViewingBrowser({ profile, draftId: draft?.id, draftText: draft?.text });
       return true;
     } catch {
       // mutate has already shown the error.
       return false;
+    }
+  };
+  const openAssignedPages = async (drafts: ComposerDraft[]) => {
+    setBusy("manual-publish");
+    let opened = 0;
+    let failed = 0;
+    try {
+      for (const [index, draft] of drafts.entries()) {
+        const profile = data.profiles.find(item => item.accountId === draft.accountId);
+        if (!profile || !await openBrowser(profile, draft, true)) {
+          failed++;
+          continue;
+        }
+        opened++;
+        if (data.remoteBrowser) {
+          setManualPages(drafts.slice(index + 1));
+          return { opened, failed };
+        }
+      }
+      setManualPages([]);
+      return { opened, failed };
+    } finally {
+      setBusy("");
     }
   };
   const openDraftInX = async (draft: Draft) => {
@@ -530,7 +565,7 @@ function App({
   const checkedDrafts = selectableDrafts.filter(draft => checkedDraftIds.has(draft.id));
   const checkedPublishable = checkedDrafts.every(draft => draft.status === "draft" || draft.status === "error");
   const bulkPublishHint = !data.settings.xConfigured
-    ? data.settings.publishingMethod === "mcp" ? "大模型 MCP 待接入。" : "管理员启用 X 官方 API 后可批量发布。"
+    ? "管理员启用 X 官方 API 后可在这里批量发布。"
     : !checkedPublishable ? "请选择草稿或发布失败的内容。"
     : checkedDrafts.length > MAX_BULK_PUBLISH ? `每次最多发布 ${MAX_BULK_PUBLISH} 条。` : "";
 
@@ -1775,6 +1810,21 @@ function App({
                                           发布
                                         </Button>
                                       )}
+                                      {draft.publishingMode === "mcp" && !mcpUnavailable && (
+                                        <Button icon={Sparkles} disabled={!!busy || !draft.text.trim()}
+                                          onClick={() => setConfirmation({
+                                            title: "使用大模型 MCP 发布？",
+                                            description: `将为「${accountName(draft.accountId)}」打开 X 发布页，由模型点击发布。`,
+                                            label: "确认发布",
+                                            action: async () => {
+                                              await mutate(draft.id, `/api/drafts/${draft.id}/publish-mcp`, "POST",
+                                                { confirmedText: draft.text }, "已将草稿加入 MCP 发布队列。");
+                                              setConfirmation(null);
+                                            },
+                                          })}>
+                                          MCP 发布
+                                        </Button>
+                                      )}
                                       {(!data.settings.xConfigured || data.profiles.some(item => item.accountId === draft.accountId)) && (
                                         <Button
                                           icon={ExternalLink}
@@ -1965,12 +2015,28 @@ function App({
         <PostDistributionDialog
           posts={postDistribution}
           accounts={data.accounts}
+          profiles={data.profiles}
+          xConfigured={data.settings.xConfigured}
+          mcpUnavailable={mcpUnavailable}
           onClose={() => setPostDistribution(null)}
-          onAssigned={async ({ created, existing }) => {
+          onAssigned={async ({ created, existing, drafts }, mode, assignment) => {
             setPostDistribution(null);
-            changeDraftFilter("draft");
-            await Promise.all([refresh(), refreshPendingPosts()]);
-            setToast({ text: `已创建 ${created} 条发布草稿${existing ? `，跳过 ${existing} 条已分配记录` : ""}。` });
+            if (assignment !== "oneEach") changeDraftFilter(mode === "manual" ? "draft" : "all");
+            const pendingRefresh = refreshPendingPosts();
+            const skipped = existing ? `，跳过 ${existing} 条已分配记录` : "";
+            if (!created) {
+              setToast({ text: `所选文案已分配，跳过 ${existing} 条记录。` });
+            } else if (mode === "manual") {
+              setToast({ text: `已创建 ${created} 条草稿，正在打开 X 发布页…` });
+              const { opened, failed } = await openAssignedPages(drafts);
+              setToast({
+                text: `已创建 ${created} 条草稿，打开 ${opened} 个发布页${skipped}${failed ? `，${failed} 个页面打开失败，可从草稿重试` : ""}。`,
+                error: failed > 0,
+              });
+            } else {
+              setToast({ text: `已将 ${created} 条任务加入发布队列${skipped}。` });
+            }
+            await Promise.all([refresh(), pendingRefresh]);
           }}
         />
       )}
@@ -2016,10 +2082,20 @@ function App({
         <Dialog
           title={viewingBrowser.profile.label}
           description="点击画面操作 X。离开画面请按 Esc。"
-          onClose={() => setViewingBrowser(null)}
+          onClose={() => { if (!busy) { setViewingBrowser(null); setManualPages([]); } }}
           className="remote-browser-dialog"
         >
+          {!!manualPages.length && (
+            <div className="manual-publish-next">
+              <Button disabled={!!busy} icon={ArrowRight} onClick={async () => {
+                const { failed } = await openAssignedPages(manualPages);
+                if (failed) setToast({ text: `${failed} 个发布页打开失败，可从草稿重试。`, error: true });
+                void refresh();
+              }}>打开下一条草稿（剩余 {manualPages.length} 条）</Button>
+            </div>
+          )}
           <BrowserView
+            key={viewingBrowser.draftId ?? viewingBrowser.profile.id}
             id={viewingBrowser.profile.id}
             draftText={viewingBrowser.draftText}
             onStop={() => {
@@ -2031,7 +2107,7 @@ function App({
                 undefined,
                 "环境已关闭",
               ).then(
-                () => setViewingBrowser(null),
+                () => { setViewingBrowser(null); setManualPages([]); },
                 () => {},
               );
             }}
@@ -4106,100 +4182,146 @@ function PendingPostsPanel({
 }
 
 function PostDistributionDialog({
-  posts, accounts, onClose, onAssigned,
+  posts, accounts, profiles, xConfigured, mcpUnavailable, onClose, onAssigned,
 }: {
   posts: PendingPost[];
   accounts: Account[];
+  profiles: Profile[];
+  xConfigured: boolean;
+  mcpUnavailable: string;
   onClose: () => void;
-  onAssigned: (result: { created: number; existing: number }) => Promise<void>;
+  onAssigned: (result: AssignmentResult, mode: DistributionPublishingMode, assignment: AssignmentMode) => Promise<void>;
 }) {
-  const [mode, setMode] = useState<AssignmentMode>("oneAccount");
-  const [single, setSingle] = useState("");
-  const [multi, setMulti] = useState<string[]>([]);
-  const [paired, setPaired] = useState<string[]>(() => posts.map(() => ""));
+  const [mode, setMode] = useState<AssignmentMode>("allAccounts");
+  const [publishingMode, setPublishingMode] = useState<DistributionPublishingMode>("manual");
+  const [selected, setSelected] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const accountIds = mode === "oneAccount" ? (single ? [single] : []) : mode === "samePost" ? multi : paired;
-  const valid = mode === "oneAccount" ? Boolean(single) : mode === "samePost" ? multi.length >= 2 : paired.every(Boolean);
+  const accountIds = mode === "oneEach" ? selected.slice(0, posts.length) : selected;
+  const chosenAccounts = accounts.filter(account => accountIds.includes(account.id));
+  const allAccountsSelected = accounts.length > 0 && accounts.every(account => selected.includes(account.id));
+  const oneEachHint = posts.length < 2
+    ? "请在待发布列表选择至少 2 条文案。"
+    : accounts.length < 2 ? "请先添加至少 2 个账号。" : "";
+  const taskCount = mode === "oneEach" ? accountIds.length : selected.length * posts.length;
+  const automated = publishingMode !== "manual";
 
+  let issue = "";
+  if (publishingMode === "official" && !xConfigured) {
+    issue = "请先在管理后台启用并配置 X 官方 API。";
+  } else if (publishingMode === "mcp" && mcpUnavailable) {
+    issue = mcpUnavailable;
+  } else if (publishingMode === "official" && chosenAccounts.some(account => !account.xConnected)) {
+    issue = "请先为所选账号完成 X 官方 API 授权。";
+  } else if (publishingMode !== "official" && chosenAccounts.some(account => !profiles.some(profile => profile.accountId === account.id))) {
+    issue = "请先为所选账号创建浏览器环境。";
+  } else if (publishingMode === "mcp" && chosenAccounts.some(account => !(account.xUsername || account.username))) {
+    issue = "请先为所选账号填写 X 用户名。";
+  } else if (automated && mode === "allAccounts" && selected.length > 1) {
+    issue = "批量自动发布需要为各账号分配不同正文。";
+  } else if (taskCount > MAX_BULK_PUBLISH) {
+    issue = `每次最多分配 ${MAX_BULK_PUBLISH} 条发布任务。`;
+  }
+  const valid = accountIds.length > 0 && chosenAccounts.length === accountIds.length &&
+    !(mode === "oneEach" && (oneEachHint || accountIds.length < 2)) && !issue;
   const accountLabel = (account: Account) => account.username ? `${account.label} · @${account.username}` : account.label;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!valid) return;
+    if (!valid || saving) return;
     setError("");
     setSaving(true);
+    let result: AssignmentResult;
     try {
-      await onAssigned(await request("/api/pending-posts/assign", "POST", {
-        mode, postIds: posts.map(post => post.id), accountIds,
-      }));
+      result = await request("/api/pending-posts/assign", "POST", {
+        mode, publishingMode, postIds: posts.map(post => post.id), accountIds,
+      });
     } catch (error) {
       setSaving(false);
       setError((error as Error).message);
+      return;
     }
+    await onAssigned(result, publishingMode, mode);
   }
 
   return (
-    <Dialog title="分配发布" description={`已选 ${posts.length} 条文案。确认后会为目标账号创建发布草稿。`}
+    <Dialog title="分配发布" description={`已选 ${posts.length} 条文案。`}
       className="dialog-wide" onClose={() => { if (!saving) onClose(); }}>
       <form onSubmit={submit}>
         <div className="dialog-body">
           <fieldset className="post-distribution" disabled={saving}>
             <legend>分配方式</legend>
             <div className="post-distribution-options">
-              {(Object.keys(assignmentModes) as AssignmentMode[]).map((value) => {
-                const disabled = value === "samePost" ? posts.length !== 1 || accounts.length < 2
-                  : value === "oneEach" ? posts.length < 2 || posts.length > accounts.length : false;
-                return (
-                  <label key={value}>
-                    <input type="radio" name="assignment" value={value} disabled={disabled}
-                      checked={mode === value} onChange={() => setMode(value)} />
+              {(Object.keys(assignmentModes) as AssignmentMode[]).map(value => (
+                <div key={value}>
+                  <label>
+                    <input type="radio" name="assignment" value={value}
+                      disabled={value === "oneEach" && Boolean(oneEachHint)}
+                      aria-describedby={value === "oneEach" && oneEachHint ? "one-each-hint" : undefined}
+                      checked={mode === value} onChange={() => { setMode(value); setError(""); }} />
                     {assignmentModes[value]}
                   </label>
-                );
-              })}
+                  {value === "oneEach" && oneEachHint && (
+                    <p id="one-each-hint" className="post-distribution-hint">{oneEachHint}</p>
+                  )}
+                </div>
+              ))}
             </div>
           </fieldset>
-          {mode === "oneAccount" && (
-            <Field label="目标 X 账号">
-              <select value={single} onChange={(event) => setSingle(event.target.value)} disabled={saving} required>
-                <option value="">选择账号</option>
-                {accounts.map(account => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}
-              </select>
-            </Field>
-          )}
-          {mode === "samePost" && (
-            <fieldset className="post-distribution post-account-list" disabled={saving}>
-              <legend>目标 X 账号（至少选两个）</legend>
-              {accounts.map(account => (
-                <label key={account.id}>
-                  <input type="checkbox" checked={multi.includes(account.id)}
-                    disabled={!multi.includes(account.id) && multi.length >= MAX_VARIANTS + 1}
-                    onChange={(event) => setMulti(event.target.checked ? [...multi, account.id] : multi.filter(id => id !== account.id))} />
-                  {accountLabel(account)}
-                </label>
-              ))}
-            </fieldset>
-          )}
-          {mode === "oneEach" && (
-            <div className="post-account-list">
-              {posts.map((post, index) => (
-                <Field key={post.id} label={`文案 ${index + 1}的目标账号`} hint={post.text.slice(0, 120)}>
-                  <select value={paired[index]} required disabled={saving}
-                    onChange={(event) => setPaired(paired.map((id, i) => i === index ? event.target.value : id))}>
-                    <option value="">选择账号</option>
-                    {accounts.map(account => <option key={account.id} value={account.id}
-                      disabled={paired.some((id, i) => i !== index && id === account.id)}>{accountLabel(account)}</option>)}
-                  </select>
-                </Field>
-              ))}
+          <fieldset className="post-distribution" disabled={saving}>
+            <legend>目标 X 账号（已选 {selected.length} / {accounts.length}）</legend>
+            <div className="post-account-picker">
+              <div className="post-account-toolbar">
+                <Button type="button" variant="ghost" disabled={!accounts.length} aria-controls="distribution-accounts"
+                  onClick={() => {
+                    setSelected(allAccountsSelected ? [] : accounts.map(account => account.id));
+                    setError("");
+                  }}>
+                  {allAccountsSelected ? "取消全选" : "全选"}
+                </Button>
+              </div>
+              <div className="post-account-list" id="distribution-accounts">
+                {accounts.map(account => (
+                  <label key={account.id}>
+                    <input type="checkbox" checked={selected.includes(account.id)}
+                      onChange={event => {
+                        setSelected(event.target.checked ? [...selected, account.id] : selected.filter(id => id !== account.id));
+                        setError("");
+                      }} />
+                    {accountLabel(account)}
+                  </label>
+                ))}
+              </div>
             </div>
+          </fieldset>
+          {mode === "oneEach" && (
+            <p className="post-assignment-summary" role="status">
+              {taskCount < 2 ? "请勾选至少 2 个账号。" :
+                `将按勾选顺序分配前 ${taskCount} 条文案，剩余 ${posts.length - taskCount} 条留在待发布。`}
+              {selected.length > taskCount && ` 多选的 ${selected.length - taskCount} 个账号本次不分配。`}
+            </p>
           )}
-          {error && <p className="form-error" role="alert">{error}</p>}
+          <Field label="发布模式" hint={{
+            official: "使用已授权的 X 账号，通过官方 API 提交发布。",
+            manual: "自动打开对应账号的 X 发布页并预填正文，由员工点击发布。",
+            mcp: "自动打开 X 发布页并预填正文，由发布模型通过 MCP 点击发布。",
+          }[publishingMode]}>
+            <select value={publishingMode} disabled={saving} onChange={event => {
+              setPublishingMode(event.target.value as DistributionPublishingMode);
+              setError("");
+            }}>
+              {Object.entries(distributionPublishingModes).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </Field>
+          {(error || issue) && <p className="form-error" role="alert">{error || issue}</p>}
         </div>
         <div className="dialog-footer">
           <Button type="button" onClick={onClose} disabled={saving}>取消</Button>
-          <Button type="submit" variant="primary" icon={Send} disabled={!valid || saving} busy={saving}>创建发布草稿</Button>
+          <Button type="submit" variant="primary" icon={automated ? Send : ExternalLink} disabled={!valid || saving} busy={saving}>
+            {automated ? "确认发布" : "打开发布页"}{taskCount > 0 ? `（${taskCount}）` : ""}
+          </Button>
         </div>
       </form>
     </Dialog>

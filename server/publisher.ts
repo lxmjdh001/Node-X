@@ -1,11 +1,12 @@
 import { ContentError, publishX, type XToken } from './content.js';
 import { workspaceAuthorized } from './auth.js';
+import { publishInBrowser } from './browser-publishing.js';
 import { publishingStatus } from './publishing-settings.js';
 import { customerWorkspaceIds, row, runInWorkspace, write, reveal, seal } from './store.js';
 
 export const publishable = "status IN ('draft', 'error')";
 
-type PendingDraft = { id: string; text: string; accountId: string; token: string | null };
+type PendingDraft = { id: string; text: string; accountId: string; token: string | null; publishingMode: 'official' | 'mcp' };
 const workspaces = new Set<string | undefined>();
 const active = new Map<string | undefined, Promise<void>>();
 const MAX_CONCURRENT = 3;
@@ -24,42 +25,47 @@ export function recoverPublishQueue() {
   }
 }
 
-function nextDraft(): PendingDraft | undefined {
+function nextDraft(officialConfigured: boolean): PendingDraft | undefined {
   return row<PendingDraft>(`
-    SELECT drafts.id, drafts.text, drafts.accountId, accounts.token
+    SELECT drafts.id, drafts.text, drafts.accountId, drafts.publishingMode, accounts.token
     FROM drafts JOIN accounts ON accounts.id = drafts.accountId
     WHERE drafts.status = 'scheduled' AND scheduledAt <= ?
+      AND (drafts.publishingMode = 'mcp' OR ? = 1)
     ORDER BY scheduledAt, drafts.rowid LIMIT 1
-  `, new Date().toISOString());
+  `, new Date().toISOString(), Number(officialConfigured));
 }
 
 async function publishNext(workspace: string | undefined, draft: PendingDraft): Promise<void> {
   if (!write("UPDATE drafts SET status = 'publishing', error = NULL WHERE id = ? AND status = 'scheduled'", draft.id)) return;
 
-  let token: XToken;
   try {
-    if (!draft.token) throw new Error('Missing token');
-    token = JSON.parse(reveal(draft.token)) as XToken;
-  } catch {
-    write("UPDATE drafts SET status = 'error', error = ? WHERE id = ?",
-      '账号授权不可用，请重新连接 X 后再发布。', draft.id);
-    return;
-  }
-
-  try {
-    const { postId } = await publishX(token, draft.text, (next) => {
-      write('UPDATE accounts SET token = ? WHERE id = ?', seal(JSON.stringify(next)), draft.accountId);
-    }, () => {
-      if (!workspaceAuthorized(workspace)) throw new ContentError('WORKSPACE_EXPIRED', '客户授权已结束，帖文未发送，请续期后重新安排发布。', 403);
-    });
+    const postId = draft.publishingMode === 'mcp'
+      ? await publishInBrowser(workspace, draft.accountId, draft.text)
+      : await publishOfficial(workspace, draft);
     write("UPDATE drafts SET status = 'published', postId = ? WHERE id = ?", postId, draft.id);
   } catch (error) {
     const failed = error instanceof ContentError && error.outcome === 'failed';
     write('UPDATE drafts SET status = ?, error = ? WHERE id = ?',
       failed ? 'error' : 'uncertain',
-      failed ? error.message : '无法确认发布结果。请先到 X 核对该帖子是否已经发出。',
+      error instanceof ContentError ? error.message : '无法确认发布结果。请先到 X 核对该帖子是否已经发出。',
       draft.id);
   }
+}
+
+async function publishOfficial(workspace: string | undefined, draft: PendingDraft) {
+  let token: XToken;
+  try {
+    if (!draft.token) throw new Error('Missing token');
+    token = JSON.parse(reveal(draft.token)) as XToken;
+  } catch {
+    throw new ContentError('INVALID_TOKEN', '账号授权不可用，请重新连接 X 后再发布。', 409);
+  }
+  const { postId } = await publishX(token, draft.text, (next) => {
+    write('UPDATE accounts SET token = ? WHERE id = ?', seal(JSON.stringify(next)), draft.accountId);
+  }, () => {
+    if (!workspaceAuthorized(workspace)) throw new ContentError('WORKSPACE_EXPIRED', '客户授权已结束，帖文未发送，请续期后重新安排发布。', 403);
+  });
+  return postId;
 }
 
 export function scheduleWorkspace(workspace: string | undefined) {
@@ -79,8 +85,8 @@ export function runPublishQueue() {
           workspaces.delete(workspace);
           return;
         }
-        if (!configured || active.size >= MAX_CONCURRENT) return;
-        const draft = nextDraft();
+        if (active.size >= MAX_CONCURRENT) return;
+        const draft = nextDraft(configured);
         if (!draft) {
           if (!hasScheduled()) workspaces.delete(workspace);
           return;

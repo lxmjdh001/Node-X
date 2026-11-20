@@ -3979,19 +3979,73 @@ td strong {
   font-weight: 600;
 }
 
+.post-distribution-hint {
+  margin: 0 0 4px 24px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .post-distribution-options,
 .post-account-list {
   display: grid;
-  gap: 10px;
+  gap: 4px;
+}
+
+.post-account-picker {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.post-account-toolbar {
+  display: flex;
+  padding: 2px 5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.post-account-picker .post-account-list {
+  max-height: min(220px, 32dvh);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  border: 0;
+  border-radius: 0;
+}
+
+.post-account-list {
+  min-width: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.post-assignment-summary {
+  margin: -6px 0 16px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .post-distribution label {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 32px;
+  overflow-wrap: anywhere;
 }
 
+.post-distribution input { accent-color: var(--blue); }
 .post-distribution label:has(input:disabled) { opacity: .6; }
+
+.manual-publish-next {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 14px 0;
+}
+
+@media (pointer: coarse) {
+  .post-distribution label { min-height: 44px; }
+}
 
 .model-page {
   display: grid;

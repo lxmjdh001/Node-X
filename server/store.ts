@@ -128,6 +128,7 @@ function openDatabase(directory: string): DatabaseSync {
     prompt TEXT NOT NULL,
     text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'scheduled', 'publishing', 'published', 'error', 'uncertain')),
+    publishingMode TEXT NOT NULL DEFAULT 'official' CHECK(publishingMode IN ('official', 'manual', 'mcp')),
     scheduledAt TEXT,
     postId TEXT,
     error TEXT,
@@ -148,6 +149,7 @@ function openDatabase(directory: string): DatabaseSync {
     pendingPostId TEXT NOT NULL REFERENCES pending_posts(id) ON DELETE CASCADE,
     accountId TEXT NOT NULL REFERENCES accounts(id),
     draftId TEXT NOT NULL UNIQUE REFERENCES drafts(id) ON DELETE CASCADE,
+    completesPost INTEGER NOT NULL DEFAULT 0 CHECK(completesPost IN (0, 1)),
     PRIMARY KEY (pendingPostId, accountId)
   ) STRICT;
   CREATE TABLE IF NOT EXISTS ai_models (
@@ -172,6 +174,8 @@ function openDatabase(directory: string): DatabaseSync {
     { table: 'profiles', column: 'colorScheme', definition: "TEXT NOT NULL DEFAULT 'light'" },
     { table: 'profiles', column: 'reducedMotion', definition: "TEXT NOT NULL DEFAULT 'no-preference'" },
     { table: 'pending_posts', column: 'generatedBy', definition: 'TEXT' },
+    { table: 'pending_post_assignments', column: 'completesPost', definition: 'INTEGER NOT NULL DEFAULT 0 CHECK(completesPost IN (0, 1))' },
+    { table: 'drafts', column: 'publishingMode', definition: "TEXT NOT NULL DEFAULT 'official' CHECK(publishingMode IN ('official', 'manual', 'mcp'))" },
     { table: 'ai_models', column: 'providerWorkspace', definition: 'TEXT' },
   ];
   const missingColumns = () => migrations.filter(({ table, column }) =>

@@ -51,6 +51,10 @@ export const profileById = (id: string) => requireFound(row<Profile>('SELECT * F
 export const openProxy = (proxy: Proxy) => ({
   host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password ? reveal(proxy.password) : '',
 });
+export function accountBrowserProfile(accountId: string) {
+  return row<Profile>('SELECT * FROM profiles WHERE accountId = ? ORDER BY rowid DESC LIMIT 1', accountId);
+}
+
 function draftTextForProfile(profile: Profile, draftId: string) {
   const draft = requireFound(row<{ text: string; status: string }>(
     "SELECT text, status FROM drafts WHERE id = ? AND accountId = ?", draftId, profile.accountId,

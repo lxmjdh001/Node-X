@@ -65,7 +65,7 @@ export function PublishingSettingsPanel({ request }: {
             </select>
           </Field>
           {method === "mcp" ? (
-            <p className="subtle">大模型 MCP 待接入。选择此模式会暂停官方 API 队列，切回官方 API 后继续处理。</p>
+            <p className="subtle">在分配发布中选择大模型 MCP 可使用默认发布模型和工作台 Chromium。此设置会暂停官方 API 队列，切回官方 API 后继续处理。</p>
           ) : (
             <>
               <Field label="X OAuth Client ID">

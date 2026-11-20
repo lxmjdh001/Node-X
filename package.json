@@ -16,6 +16,7 @@
     "browser:install": "playwright install chromium"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "csv-parse": "^7.0.3",
     "express": "^5.3.0",
     "lucide-react": "^1.76.0",

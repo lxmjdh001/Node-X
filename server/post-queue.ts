@@ -3,14 +3,18 @@ import { Router } from 'express';
 import twitterText from 'twitter-text';
 import { z } from 'zod';
 import { MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postOutputLanguages, type PostLayout, type PostOutputLanguage } from '../src/post-queue.js';
+import { MAX_BULK_PUBLISH } from '../src/publishing.js';
 import { sessionHasAccess } from './auth.js';
-import { validatePostText } from './content.js';
-import { addDraft, contentDeleteIds } from './editor.js';
+import { browserPublishingTarget, checkBrowserPublishing } from './browser-publishing.js';
+import { validatePostText, xAuthorizationMatches } from './content.js';
+import { addDraft, contentDeleteIds, enqueueDraft } from './editor.js';
 import { InputError, requireFound } from './errors.js';
 import { activeModel, runModel } from './models.js';
 import { postSource, readPostSource } from './post-source.js';
+import { scheduleWorkspace } from './publisher.js';
+import { xAuthSettings } from './publishing-settings.js';
 import { row, rows, workspaceDb, workspaceId, write } from './store.js';
-import { accountById } from './workspace.js';
+import { accountBrowserProfile, accountById } from './workspace.js';
 
 export const postQueue = Router();
 
@@ -27,11 +31,12 @@ const batchInput = z.object({
 const uniqueIds = z.array(z.uuid()).min(1).max(MAX_VARIANTS + 1)
   .refine(ids => new Set(ids).size === ids.length, '选择的记录存在重复。');
 const distributionInput = z.object({
-  mode: z.enum(['oneAccount', 'oneEach', 'samePost']),
+  mode: z.enum(['allAccounts', 'oneAccount', 'oneEach', 'samePost']),
+  publishingMode: z.enum(['official', 'manual', 'mcp']).optional(),
   postIds: uniqueIds,
   accountIds: uniqueIds,
 });
-type QueuedPost = { id: string; sourceUrl: string | null; text: string };
+type QueuedPost = { id: string; sourceUrl: string | null; text: string; completed: number };
 
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: 'sentence' });
 
@@ -84,7 +89,9 @@ postQueue.get('/pending-posts', (_req, res) => {
   const posts = rows(`
     SELECT p.id, p.sourceUrl, p.text, p.variant, p.generatedBy,
       (SELECT COUNT(*) FROM pending_post_assignments a WHERE a.pendingPostId = p.id) AS assignedCount
-    FROM pending_posts p ORDER BY p.createdAt DESC, p.batchId, p.variant
+    FROM pending_posts p
+    WHERE NOT EXISTS (SELECT 1 FROM pending_post_assignments a WHERE a.pendingPostId = p.id AND a.completesPost = 1)
+    ORDER BY p.createdAt DESC, p.batchId, p.variant
   `);
   res.json({ posts });
 });
@@ -192,29 +199,69 @@ postQueue.post('/pending-posts', async (req, res) => {
   }
 });
 
-postQueue.post('/pending-posts/assign', (req, res) => {
-  const { mode, postIds, accountIds } = distributionInput.parse(req.body);
+postQueue.post('/pending-posts/assign', async (req, res) => {
+  const { mode, postIds, accountIds, publishingMode } = distributionInput.parse(req.body);
   if (mode === 'oneAccount' && accountIds.length !== 1) throw new InputError('此方式需要选择一个账号。');
-  if (mode === 'oneEach' && (postIds.length < 2 || postIds.length !== accountIds.length)) {
-    throw new InputError('请为每条帖子分别选择一个不同的账号。');
+  if (mode === 'oneEach' && (postIds.length < 2 || accountIds.length < 2)) {
+    throw new InputError('请选择至少两条文案和两个账号。');
   }
   if (mode === 'samePost' && (postIds.length !== 1 || accountIds.length < 2)) {
     throw new InputError('请选择一条帖子和至少两个账号。');
   }
+  const total = mode === 'oneEach' ? Math.min(postIds.length, accountIds.length) : postIds.length * accountIds.length;
+  if (total > MAX_BULK_PUBLISH) throw new InputError(`每次最多分配 ${MAX_BULK_PUBLISH} 条发布任务。`);
+
+  const config = publishingMode === 'official' ? xAuthSettings() : undefined;
+  if (publishingMode === 'official' && !config) throw new InputError('请先在管理后台启用并配置 X 官方 API。', 409);
+  if (publishingMode === 'mcp') {
+    const hasAccess = sessionHasAccess(req);
+    await checkBrowserPublishing();
+    if (!hasAccess()) throw new InputError('登录已失效，请重新登录。', 401);
+  }
+  const automated = publishingMode === 'official' || publishingMode === 'mcp';
+  const time = new Date().toISOString();
   const result = transaction(() => {
-    const posts = postIds.map(id => requireFound(row<QueuedPost>('SELECT id, sourceUrl, text FROM pending_posts WHERE id = ?', id), '找不到选中的帖子。'));
-    const accounts = accountIds.map(accountById);
-    const pairs = mode === 'samePost'
-      ? accounts.map(account => [posts[0], account] as const)
-      : posts.map((post, index) => [post, accounts[mode === 'oneEach' ? index : 0]] as const);
-    let created = 0;
+    const posts = postIds.slice(0, total).map(id => requireFound(row<QueuedPost>(`
+      SELECT id, sourceUrl, text, EXISTS (
+        SELECT 1 FROM pending_post_assignments a WHERE a.pendingPostId = p.id AND a.completesPost = 1
+      ) AS completed FROM pending_posts p WHERE id = ?
+    `, id), '找不到选中的帖子。'));
+    const accounts = accountIds.slice(0, total).map(accountById);
+    const pairs = mode === 'oneEach'
+      ? posts.map((post, index) => [post, accounts[index]] as const)
+      : accounts.flatMap(account => posts.map(post => [post, account] as const));
+    const drafts = [];
+    const seen = new Set<string>();
     for (const [post, account] of pairs) {
-      if (row('SELECT 1 FROM pending_post_assignments WHERE pendingPostId = ? AND accountId = ?', post.id, account.id)) continue;
-      const draft = addDraft(account.id, post.sourceUrl ?? '', post.text);
-      write('INSERT INTO pending_post_assignments (pendingPostId, accountId, draftId) VALUES (?, ?, ?)', post.id, account.id, draft);
-      created++;
+      const existing = row('SELECT 1 FROM pending_post_assignments WHERE pendingPostId = ? AND accountId = ?', post.id, account.id);
+      if (post.completed && !existing) throw new InputError('部分文案已分配，请刷新待发布列表。', 409);
+      if (existing) {
+        if (mode === 'oneEach' && !post.completed) {
+          write('UPDATE pending_post_assignments SET completesPost = 1 WHERE pendingPostId = ? AND accountId = ?', post.id, account.id);
+        }
+        continue;
+      }
+      if (config && !xAuthorizationMatches(account.token, config.clientId)) {
+        throw new InputError(`「${account.label}」需要先连接 X 官方 API。`, 409);
+      }
+      if (publishingMode === 'manual' && !accountBrowserProfile(account.id)) {
+        throw new InputError(`「${account.label}」需要先创建浏览器环境。`, 409);
+      }
+      if (publishingMode === 'mcp') browserPublishingTarget(account);
+      const text = automated ? validatePostText(post.text) : post.text;
+      if (automated) {
+        const canonical = text.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+        if (seen.has(canonical)) throw new InputError('批量自动发布需要为各账号分配不同的正文。');
+        seen.add(canonical);
+      }
+      const id = addDraft(account.id, post.sourceUrl ?? '', text, publishingMode);
+      if (automated) enqueueDraft(id, text, time, publishingMode);
+      write('INSERT INTO pending_post_assignments (pendingPostId, accountId, draftId, completesPost) VALUES (?, ?, ?, ?)',
+        post.id, account.id, id, Number(mode === 'oneEach'));
+      drafts.push({ id, accountId: account.id, text });
     }
-    return { created, existing: pairs.length - created };
+    return { created: drafts.length, existing: pairs.length - drafts.length, drafts };
   });
+  if (automated && result.created) scheduleWorkspace(workspaceId());
   res.status(201).json(result);
 });

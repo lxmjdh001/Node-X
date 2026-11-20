@@ -6,6 +6,19 @@ export const publishingMethods = {
 } as const;
 
 export type PublishingMethod = keyof typeof publishingMethods;
+export const distributionPublishingModes = {
+  official: publishingMethods.official,
+  manual: '手动发布',
+  mcp: publishingMethods.mcp,
+} as const;
+
+export type DistributionPublishingMode = keyof typeof distributionPublishingModes;
+export type AssignmentResult = {
+  created: number;
+  existing: number;
+  drafts: { id: string; accountId: string; text: string }[];
+};
+
 export type PublishingSettings = {
   method: PublishingMethod;
   clientId: string;

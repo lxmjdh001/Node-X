@@ -55,6 +55,7 @@ const sessions = new Map<string, BrowserSession>();
 const macSessions = new Map<string, MacChromeSession>();
 const operations = new Map<string, Promise<unknown>>();
 const remoteStarting = new Set<string>();
+const automatedPages = new WeakSet<Page>();
 const REMOTE_BROWSER_LIMIT = 8;
 const REMOTE_IDLE_MS = 15 * 60 * 1000;
 let chromiumVersionCache: { signature: string; version: string } | undefined;
@@ -253,8 +254,12 @@ async function startMacChrome(key: string, directory: string, profile: BrowserSe
   return { version };
 }
 
-/** Opens an ordinary Chromium window for manual use. The actual engine supplies its own UA/version. */
-export async function startBrowser(profile: BrowserSettings, draftText?: string): Promise<{ version: string }> {
+/** Opens a browser using the saved profile. The actual engine supplies its own UA/version. */
+export async function startBrowser(
+  profile: BrowserSettings,
+  draftText?: string,
+  onComposer?: (page: Page) => void,
+): Promise<{ version: string }> {
   profile = { ...profile, proxy: { ...profile.proxy } };
   validateProfile(profile);
   if (shuttingDown) throw new Error('服务正在关闭，请稍后重试。');
@@ -279,6 +284,7 @@ export async function startBrowser(profile: BrowserSettings, draftText?: string)
         try {
           await openXPage(page, xComposeUrl(draftText));
           await page.bringToFront();
+          onComposer?.(page);
           existing.lastUse = Date.now();
         } catch (error) {
           await page.close().catch(() => undefined);
@@ -345,6 +351,7 @@ export async function startBrowser(profile: BrowserSettings, draftText?: string)
         void session.bridge.close().catch(() => undefined);
       });
       await page.bringToFront();
+      if (draftText) onComposer?.(page);
       return { version };
     } catch (error) {
       await context?.close().catch(() => undefined);
@@ -364,6 +371,22 @@ export async function startBrowser(profile: BrowserSettings, draftText?: string)
       remoteStarting.delete(key);
     }
   });
+}
+
+export async function useBrowserComposer<T>(
+  profile: BrowserSettings, text: string, action: (page: Page) => Promise<T>,
+): Promise<T> {
+  let composer: Page | undefined;
+  await startBrowser(profile, text, page => {
+    composer = page;
+    automatedPages.add(page);
+  });
+  if (!composer) throw new InputError('当前浏览器环境无法由 MCP 操作。', 409);
+  try {
+    return await action(composer);
+  } finally {
+    automatedPages.delete(composer);
+  }
 }
 
 export async function stopBrowser(id: string): Promise<void> {
@@ -411,6 +434,7 @@ export type BrowserInput =
 
 export async function sendBrowserInput(id: string, input: BrowserInput): Promise<void> {
   const { session, page } = viewingSession(id);
+  if (automatedPages.has(page)) throw new InputError('MCP 正在处理此发帖页。', 409);
   if (session.inputPending) throw new InputError('上一项浏览器操作尚未完成。', 409);
   session.inputPending = true;
   try {

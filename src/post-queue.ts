@@ -21,9 +21,8 @@ export const postOutputLanguages = {
 export type PostOutputLanguage = keyof typeof postOutputLanguages;
 
 export const assignmentModes = {
-  oneAccount: '一个账号发一条或多条',
+  allAccounts: '所选账号各发全部文案',
   oneEach: '多个账号各发不同的一条',
-  samePost: '同一条发给多个账号',
 } as const;
 
 export type AssignmentMode = keyof typeof assignmentModes;
