@@ -25,10 +25,13 @@ Add the application's required secrets to that file on the server. Build each ne
 ```sh
 npm ci
 npm run build
+npm run launcher:build
 npm prune --omit=dev
 ```
 
-Install Chromium system libraries and fonts, then install the Chromium build matching the release's Playwright package into `PLAYWRIGHT_BROWSERS_PATH` as the `nodex` user. The online browser runs headless with the Chromium sandbox and uses a public SOCKS5 proxy assigned in the customer's workspace.
+Set `NODEX_CLIENT_LAUNCHER=1` to enable the macOS launcher on the public workbench. Publish `dist/node-x-mac.zip` with the release. Customers install the launcher and its Chrome extension, then click “打开 X” to open their own Chrome with the assigned SOCKS5. X cookies stay in the customer's local Chrome profile.
+
+For a deployment that uses the legacy online browser, install Chromium system libraries and fonts, then install the Chromium build matching the release's Playwright package into `PLAYWRIGHT_BROWSERS_PATH` as the `nodex` user. The online browser runs headless with the Chromium sandbox.
 
 ```sh
 node node_modules/playwright/cli.js install-deps chromium
@@ -36,7 +39,7 @@ runuser -u nodex -- env PLAYWRIGHT_BROWSERS_PATH=/var/lib/nodex/ms-playwright \
   node node_modules/playwright/cli.js install chromium --no-shell
 ```
 
-Configure `AI_API_KEY`, `AI_MODEL`, and optionally `AI_BASE_URL` in `runtime.env` to enable AI writing. The deployed browser mode opens X in the workspace browser for manual sign-in and posting. For an alternate API deployment, set `NODEX_X_PUBLISH_MODE=api`, configure `X_CLIENT_ID`, the app's `X_CLIENT_SECRET` if applicable, and `X_REDIRECT_URI=https://xai.chuhai7.com/api/x/callback`. Register that exact redirect URI and enable write access in the X Developer Console. Each workspace authorizes its own X accounts.
+Configure `AI_API_KEY`, `AI_MODEL`, and optionally `AI_BASE_URL` in `runtime.env` to enable AI writing. With `NODEX_X_PUBLISH_MODE=browser`, customers sign in and post manually in X. For an alternate API deployment, set `NODEX_X_PUBLISH_MODE=api`, configure `X_CLIENT_ID`, the app's `X_CLIENT_SECRET` if applicable, and `X_REDIRECT_URI=https://xai.chuhai7.com/api/x/callback`. Register that exact redirect URI and enable write access in the X Developer Console. Each workspace authorizes its own X accounts.
 
 For the optional customer Camoufox integration, create a separate trusted manager instance and data directory for each workspace, and set `NODEX_CUSTOMER_CAMOUFOX` to a JSON object keyed by license ID. Each value contains that instance's loopback `port` and `apiKey`. Keep manager ports unique, including the owner instance. The standard online Chromium runs without Camoufox.
 

@@ -4,10 +4,11 @@ import { isIP } from 'node:net';
 import { resolve } from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
-import { browserFrame, browserVersion, checkProxy, chromiumInfo, remoteBrowser, sendBrowserInput, startBrowser, stopBrowser } from './browser.js';
+import { browserFrame, browserVersion, checkProxy, chromiumInfo, macChromeLauncher, remoteBrowser, sendBrowserInput, startBrowser, stopBrowser } from './browser.js';
 import { managerPort } from './camoufox-client.js';
 import { contentStatus } from './content.js';
 import { InputError, requireFound } from './errors.js';
+import { clientLauncher, issueLauncherTicket, launcherExtensionId } from './launcher.js';
 import { publicProxy } from './public-proxy.js';
 import { isCustomerWorkspace, workspaceDb, workspaceDirectory, workspaceId, reveal, row, rows, seal, write } from './store.js';
 
@@ -47,6 +48,13 @@ export const profileById = (id: string) => requireFound(row<Profile>('SELECT * F
 export const openProxy = (proxy: Proxy) => ({
   host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password ? reveal(proxy.password) : '',
 });
+export function launcherProfile(id: string) {
+  const profile = profileById(id);
+  return {
+    workspace: workspaceId() ?? 'owner', profile: profile.id,
+    width: profile.width, height: profile.height, proxy: openProxy(proxyById(profile.proxyId)),
+  };
+}
 const pendingFor = (id: string) =>
   row("SELECT 1 FROM drafts WHERE accountId = ? AND status IN ('scheduled', 'publishing') LIMIT 1", id);
 
@@ -135,7 +143,7 @@ function ensureProfileFree(id: string, allowRunning = false) {
 
 workspace.get('/workspace', async (_req, res) => {
   const customer = isCustomerWorkspace();
-  const chromium = await chromiumInfo();
+  const chromium = clientLauncher ? undefined : await chromiumInfo();
   const accounts = rows<Account>('SELECT * FROM accounts ORDER BY createdAt DESC').map(({ token, xUserId: _id, ...account }) => ({
     ...account, xConnected: Boolean(token),
   }));
@@ -146,7 +154,11 @@ workspace.get('/workspace', async (_req, res) => {
   res.json({
     accounts, proxies, profiles, drafts: rows('SELECT * FROM drafts ORDER BY createdAt DESC'),
     settings: contentStatus(),
-    workspaceScope: customer ? 'customer' : 'owner', chromium, remoteBrowser: remoteBrowser(),
+    workspaceScope: customer ? 'customer' : 'owner', chromium, remoteBrowser: !clientLauncher && remoteBrowser(), macChromeLauncher,
+    ...(clientLauncher ? {
+      launcherExtensionId,
+      launcherDownload: process.env.NODEX_PUBLIC_ORIGIN ? '/node-x-mac.zip' : '/node-x-mac-preview.zip',
+    } : {}),
     camoufoxConfigured: managerPort() !== null, version: '0.1.0',
   });
 });
@@ -308,7 +320,12 @@ workspace.delete('/profiles/:id', async (req, res) => {
   }
 });
 
+workspace.post('/profiles/:id/launcher-ticket', (req, res) => {
+  issueLauncherTicket(req, res, profileById(req.params.id).id);
+});
+
 workspace.post('/profiles/:id/start', async (req, res) => {
+  if (clientLauncher) throw new InputError('请使用 Chrome 本机启动器打开 X。', 409);
   const profile = profileById(req.params.id);
   ensureProfileFree(profile.id);
   const key = operationKey(profile.id);

@@ -2756,6 +2756,10 @@ td strong {
   font-size: 11px;
   line-height: 1.9;
 }
+.launcher-download {
+  min-height: 44px;
+  margin-top: 10px;
+}
 .engine-command {
   display: block;
   width: fit-content;

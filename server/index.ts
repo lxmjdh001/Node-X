@@ -4,16 +4,18 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import { ZodError } from 'zod';
+import { launcherConfig } from '../launcher/protocol.js';
 import { auth, operatorAuth, requireAuth } from './auth.js';
-import { reapBrowsers, shutdownBrowsers } from './browser.js';
+import { macChromeLauncher, reapBrowsers, shutdownBrowsers } from './browser.js';
 import { camoufox } from './camoufox-routes.js';
 import { ContentError } from './content.js';
 import { editor } from './editor.js';
 import { InputError } from './errors.js';
 import { imports } from './imports.js';
+import { clientLauncher, redeemLauncherTicket } from './launcher.js';
 import { recoverPublishQueue, runPublishQueue, waitForPublisher } from './publisher.js';
 import { closeDatabases } from './store.js';
-import { workspace } from './workspace.js';
+import { launcherProfile, workspace } from './workspace.js';
 
 function readPort(value: string | number, name: string) {
   const port = Number(value);
@@ -36,6 +38,13 @@ const operatorPort = readPort(process.env.NODEX_OPERATOR_PORT || port + 1, 'NODE
 if (port === operatorPort) throw new Error('工作台和生成页必须使用不同端口。');
 const external = publicOrigin('NODEX_PUBLIC_ORIGIN');
 const operatorExternal = publicOrigin('NODEX_OPERATOR_PUBLIC_ORIGIN');
+if (macChromeLauncher && (process.platform !== 'darwin' || external || operatorExternal)) {
+  throw new Error('Mac 启动器只能用于本机环回地址上的工作台。');
+}
+if (clientLauncher && (macChromeLauncher || (external?.origin ?? `http://127.0.0.1:${port}`) !==
+    (external ? launcherConfig.origin : launcherConfig.previewOrigin))) {
+  throw new Error('本机启动器的工作台地址与 Chrome 扩展配置不匹配。');
+}
 if (external) process.env.NODEX_PUBLIC_HTTPS = '1';
 const localHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 const operatorAccessPort = readPort(process.env.NODEX_OPERATOR_ACCESS_PORT || operatorPort, 'NODEX_OPERATOR_ACCESS_PORT');
@@ -92,6 +101,8 @@ function sameOrigin(expected: (host: string) => string, allowOAuth = false): Req
 }
 
 app.use('/api', sameOrigin((host) => external?.origin || `http://${host}`, true));
+app.post('/api/launcher/redeem', express.json({ limit: '1kb' }),
+  (req, res) => redeemLauncherTicket(req, res, launcherProfile));
 app.use('/api/auth', express.json({ limit: '8kb' }));
 app.use('/api', auth);
 app.use('/api', requireAuth);

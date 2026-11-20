@@ -14,6 +14,12 @@ npm run dev
 
 打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)。首次运行需先配置下方的登录码生成页，AI 和 X API 密钥可按需添加。已构建的版本可用 `npm run build && npm start` 启动。
 
+## 客户本机 Chrome 启动器
+
+Mac 客户从窗口管理下载启动器，按安装包里的说明安装并在 Chrome 加载扩展。此版本需要 macOS、Google Chrome 和 Node.js 22 或更新版本。首次打开 X 时手动登录。以后使用同一窗口时，Chrome 读取该客户空间和窗口在本机保存的会话。每个窗口使用绑定的 SOCKS5，浏览器语言、时区和显示偏好沿用本机设置。
+
+在部署机器构建工作台后运行 `npm run launcher:build`，将生成的 `dist/node-x-mac.zip` 随网站发布。前台地址为 `https://xai.chuhai7.com` 时，可用 `NODEX_CLIENT_LAUNCHER=1` 启用客户本机模式。本机验收用 `npm run launcher:build -- --preview`，工作台监听 `127.0.0.1:4283`，并启用同一个环境变量。预览和线上启动器使用独立的数据目录。
+
 ## 登录和设备登记
 
 工作台需要登录码。开发环境的生成页是 `http://127.0.0.1:4174/operator`。部署环境可经 HTTPS 公开生成页，生产地址是 `https://xai.chuhai7.com/operator`，入口检查 Mac Chrome。

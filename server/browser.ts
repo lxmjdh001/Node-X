@@ -3,24 +3,17 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, mkdir, stat } from 'node:fs/promises';
 import { get } from 'node:https';
-import { createConnection, createServer, isIP, type Socket } from 'node:net';
+import { isIP } from 'node:net';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { domainToASCII } from 'node:url';
 import { chromium, type BrowserContext, type Page, type Response } from 'playwright';
-import { RequestError, Server as ProxyServer } from 'proxy-chain';
 import { SocksProxyAgent } from 'socks-proxy-agent';
+import { MAC_CHROME, openMacChrome } from '../launcher/chrome.js';
 import { workspaceAuthorized } from './auth.js';
 import { InputError } from './errors.js';
-import { allowedBrowserTarget, publicProxy } from './public-proxy.js';
+import { createBridge, proxyUrl, PROXY_TIMEOUT_MS, type BrowserProxy, type ProxySettings } from './browser-proxy.js';
+import { publicProxy } from './public-proxy.js';
 import { workspaceDirectory, workspaceId } from './store.js';
-
-export type ProxySettings = {
-  host: string;
-  port: number;
-  username: string;
-  password: string;
-};
 
 export type BrowserSettings = {
   id: string;
@@ -45,15 +38,19 @@ type BrowserSession = {
   inputPending: boolean;
 };
 
-type BrowserProxy = { port: number; close: () => Promise<void> };
+type MacChromeSession = {
+  version: string;
+  workspaceId: string | undefined;
+  close: () => Promise<void>;
+};
 
 const IP_CHECK_URL = 'https://api.ipify.org?format=json';
 const X_LOGIN_URL = 'https://x.com/i/flow/login';
 const X_HOME_URL = 'https://x.com/home';
-const PROXY_TIMEOUT_MS = 15_000;
 const MAX_CHECK_BYTES = 4096;
 const UUID_PATTERN = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 const sessions = new Map<string, BrowserSession>();
+const macSessions = new Map<string, MacChromeSession>();
 const operations = new Map<string, Promise<unknown>>();
 const remoteStarting = new Set<string>();
 const REMOTE_BROWSER_LIMIT = 8;
@@ -67,12 +64,14 @@ function sessionKey(id: string): string {
 }
 
 export function remoteBrowser(): boolean {
-  return workspaceId() !== undefined || Boolean(process.env.NODEX_PUBLIC_ORIGIN) || process.env.NODEX_REMOTE_BROWSER === '1';
+  return !macChromeLauncher && (workspaceId() !== undefined || Boolean(process.env.NODEX_PUBLIC_ORIGIN) || process.env.NODEX_REMOTE_BROWSER === '1');
 }
+
+export const macChromeLauncher = process.argv.includes('--mac-launcher');
 
 /** Reports the installed executable's own version without launching a browsing session or using the network. */
 export async function chromiumInfo(): Promise<{ installed: boolean; version: string | null }> {
-  const executable = chromium.executablePath();
+  const executable = macChromeLauncher ? MAC_CHROME : chromium.executablePath();
   let signature: string;
   try {
     const [metadata] = await Promise.all([stat(executable), access(executable, constants.X_OK)]);
@@ -115,35 +114,6 @@ function validateId(id: string): void {
   if (!UUID_PATTERN.test(id)) throw new Error('账号环境 ID 必须是 UUID。');
 }
 
-function proxyUrl(proxy: ProxySettings): string {
-  if (!proxy || typeof proxy.host !== 'string') throw new Error('请填写 SOCKS5 代理地址。');
-  let host = proxy.host.trim();
-  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-  if (!isIP(host)) {
-    host = domainToASCII(host);
-    if (!host || host.length > 253 || !host.split('.').every((label) =>
-      /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label))) {
-      throw new Error('代理地址只填写 IP 或主机名，不包含协议、路径和端口。');
-    }
-  }
-  if (!Number.isInteger(proxy.port) || proxy.port < 1 || proxy.port > 65535) {
-    throw new Error('代理端口必须是 1–65535 的整数。');
-  }
-  if (typeof proxy.username !== 'string' || typeof proxy.password !== 'string') {
-    throw new Error('代理用户名和密码必须是文本。');
-  }
-  if (Boolean(proxy.username) !== Boolean(proxy.password)) {
-    throw new Error('SOCKS5 用户名和密码需一起填写，或一起留空。');
-  }
-  if (Buffer.byteLength(proxy.username) > 255 || Buffer.byteLength(proxy.password) > 255) {
-    throw new Error('SOCKS5 用户名和密码分别不能超过 255 字节。');
-  }
-  const auth = proxy.username
-    ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`
-    : '';
-  return `socks5h://${auth}${isIP(host) === 6 ? `[${host}]` : host}:${proxy.port}`;
-}
-
 function validateProfile(profile: BrowserSettings): void {
   validateId(profile.id);
   if (!Number.isInteger(profile.width) || profile.width < 320 || profile.width > 7680 ||
@@ -168,67 +138,6 @@ function serial<T>(id: string, action: () => Promise<T>): Promise<T> {
     if (operations.get(id) === current) operations.delete(id);
   }).catch(() => undefined);
   return current;
-}
-
-async function createBridge(proxy: ProxySettings, username: string, password: string, remote: boolean): Promise<BrowserProxy> {
-  let upstream = proxyUrl(proxy);
-  let closeRelay: (() => Promise<void>) | undefined;
-  const rawHost = new URL(upstream).hostname.replace(/^\[|\]$/g, '');
-  // proxy-chain currently passes IPv6 URL brackets to net.connect(). A loopback TCP relay
-  // preserves the SOCKS protocol and authentication while giving it an IPv4 upstream address.
-  if (isIP(rawHost) === 6) {
-    const sockets = new Set<Socket>();
-    const relay = createServer((incoming) => {
-      const outgoing = createConnection({ host: rawHost, port: proxy.port });
-      sockets.add(incoming);
-      sockets.add(outgoing);
-      incoming.on('close', () => { sockets.delete(incoming); outgoing.destroy(); });
-      outgoing.on('close', () => { sockets.delete(outgoing); incoming.destroy(); });
-      incoming.on('error', () => outgoing.destroy());
-      outgoing.on('error', () => incoming.destroy());
-      outgoing.setTimeout(PROXY_TIMEOUT_MS, () => outgoing.destroy());
-      outgoing.once('connect', () => outgoing.setTimeout(0));
-      incoming.pipe(outgoing).pipe(incoming);
-    });
-    await new Promise<void>((fulfill, reject) => {
-      relay.once('error', reject);
-      relay.listen(0, '127.0.0.1', () => { relay.removeListener('error', reject); fulfill(); });
-    });
-    closeRelay = () => new Promise<void>((fulfill) => {
-      for (const socket of sockets) socket.destroy();
-      relay.close(() => fulfill());
-    });
-    const address = relay.address();
-    if (!address || typeof address === 'string') {
-      await closeRelay();
-      throw new Error('无法创建本地代理连接。');
-    }
-    upstream = proxyUrl({ ...proxy, host: '127.0.0.1', port: address.port });
-  }
-  const server = new ProxyServer({
-    host: '127.0.0.1',
-    port: 0,
-    verbose: false,
-    prepareRequestFunction: (request) => {
-      if (request.username !== username || request.password !== password) return { requestAuthentication: true };
-      if (remote && !allowedBrowserTarget(request.hostname, request.port)) {
-        throw new RequestError('Browser destinations are limited to X and its sign-in services.', 403);
-      }
-      return { upstreamProxyUrl: upstream };
-    },
-  });
-  let closing: Promise<void> | undefined;
-  const close = () => closing ??= (async () => {
-    await server.close(true).catch(() => undefined);
-    await closeRelay?.();
-  })();
-  try {
-    await server.listen();
-    return { port: server.port, close };
-  } catch (error) {
-    await close();
-    throw error;
-  }
 }
 
 /** Checks one fixed HTTPS endpoint through SOCKS5; never follows redirects or falls back to direct access. */
@@ -328,6 +237,20 @@ async function openXPage(page: Page, url: string): Promise<void> {
   if (forbidden) throw new InputError('当前代理已连接，但 X 拒绝了网页访问（HTTP 403）。', 422);
 }
 
+async function startMacChrome(key: string, directory: string, profile: BrowserSettings, customerId: string | undefined) {
+  const { version } = await chromiumInfo();
+  if (!version) throw new InputError('请先在此 Mac 安装 Google Chrome。', 503);
+  const proxy = await publicProxy(profile.proxy);
+  if (shuttingDown || !workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
+  const chrome = await openMacChrome(directory, profile, proxy);
+  const session: MacChromeSession = { version, workspaceId: customerId, close: chrome.close };
+  macSessions.set(key, session);
+  void chrome.closed.finally(() => {
+    if (macSessions.get(key) === session) macSessions.delete(key);
+  });
+  return { version };
+}
+
 /** Opens an ordinary Chromium window for manual use. The actual engine supplies its own UA/version. */
 export async function startBrowser(profile: BrowserSettings): Promise<{ version: string }> {
   profile = { ...profile, proxy: { ...profile.proxy } };
@@ -339,6 +262,11 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
   const remote = remoteBrowser();
   return serial(key, async () => {
     if (shuttingDown) throw new Error('服务正在关闭，请稍后重试。');
+    if (macChromeLauncher) {
+      const active = macSessions.get(key);
+      if (active) return { version: active.version };
+      return startMacChrome(key, directory, profile, customerId);
+    }
     const existing = sessions.get(key);
     if (existing) {
       await existing.context.pages()[0]?.bringToFront().catch(() => undefined);
@@ -355,7 +283,7 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
     try {
       const proxy = remote ? await publicProxy(profile.proxy) : profile.proxy;
       if (shuttingDown || !workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
-      bridge = await createBridge(proxy, username, password, remote);
+      bridge = await createBridge(proxy, { username, password }, remote);
       await mkdir(directory, { recursive: true, mode: 0o700 });
       context = await chromium.launchPersistentContext(directory, {
         headless: remote,
@@ -426,11 +354,13 @@ async function stopSession(key: string): Promise<void> {
   await serial(key, async () => {
     const session = sessions.get(key);
     if (session) await closeSession(key, session);
+    await macSessions.get(key)?.close();
   });
 }
 
 export function browserVersion(id: string): string | null {
-  return sessions.get(sessionKey(id))?.version ?? null;
+  const key = sessionKey(id);
+  return (macChromeLauncher ? macSessions.get(key) : sessions.get(key))?.version ?? null;
 }
 
 function viewingSession(id: string): { session: BrowserSession; page: Page } {
@@ -496,10 +426,15 @@ export function reapBrowsers() {
       void stopSession(key).catch(() => undefined);
     }
   }
+  for (const [key, session] of macSessions) {
+    if (!operations.has(key) && !workspaceAuthorized(session.workspaceId)) {
+      void stopSession(key).catch(() => undefined);
+    }
+  }
 }
 
 export async function shutdownBrowsers(): Promise<void> {
   shuttingDown = true;
-  const ids = new Set([...sessions.keys(), ...operations.keys()]);
+  const ids = new Set([...sessions.keys(), ...macSessions.keys(), ...operations.keys()]);
   await Promise.allSettled([...ids].map(stopSession));
 }

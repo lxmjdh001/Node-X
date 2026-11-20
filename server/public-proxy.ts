@@ -2,7 +2,7 @@ import { lookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { InputError } from './errors.js';
-import type { ProxySettings } from './browser.js';
+import type { ProxySettings } from './browser-proxy.js';
 
 const blocked = new BlockList();
 for (const [host, bits] of [

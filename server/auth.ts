@@ -112,14 +112,24 @@ function sessionToken(req: Request, name = SESSION_COOKIE): string | undefined {
 
 function sessionFor(req: Request): Session | undefined {
   const token = sessionToken(req);
-  if (!token) return undefined;
+  return token ? sessionByHash(hash(`session:${token}`)) : undefined;
+}
+
+export function sessionHasAccess(req: Request): () => boolean {
+  const token = sessionToken(req);
+  if (!token) return () => false;
+  const sessionHash = hash(`session:${token}`);
+  return () => Boolean(sessionByHash(sessionHash));
+}
+
+function sessionByHash(sessionHash: string): Session | undefined {
   const now = Date.now();
   return db.prepare(`
     SELECT s.expiresAt, s.licenseId, l.scope, l.expiresAt AS licenseExpiresAt
     FROM auth_sessions s LEFT JOIN auth_licenses l ON l.id = s.licenseId
     WHERE s.hash = ? AND s.expiresAt > ? AND
       (s.licenseId IS NULL OR (l.expiresAt > ? AND l.revokedAt IS NULL))
-  `).get(hash(`session:${token}`), now, now) as Session | undefined;
+  `).get(sessionHash, now, now) as Session | undefined;
 }
 
 export function workspaceAuthorized(customerId: string | undefined): boolean {

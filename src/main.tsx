@@ -55,6 +55,7 @@ import {
   randomBrowserRegion,
 } from "./browser-region";
 import { parseProxyAddress } from "./proxy-address";
+import { launchOnMac } from "./local-launcher";
 import "./styles.css";
 
 type Account = {
@@ -115,6 +116,9 @@ type Workspace = {
   chromium?: { installed: boolean; version: string | null };
   workspaceScope?: "owner" | "customer";
   remoteBrowser?: boolean;
+  macChromeLauncher?: boolean;
+  launcherExtensionId?: string;
+  launcherDownload?: string;
   camoufoxConfigured?: boolean;
   version: string;
 };
@@ -409,6 +413,7 @@ function App({
 }) {
   const [page, setPage] = useState<Page>(workbenchPage);
   const [data, setData] = useState<Workspace>(blank);
+  const clientLauncher = data.launcherExtensionId;
   const customer = data.workspaceScope === "customer";
   const showCamoufox =
     data.workspaceScope === "owner" || data.camoufoxConfigured;
@@ -544,6 +549,21 @@ function App({
     void mutate(key, path, "POST", undefined, success).catch(() => {});
   };
   const openBrowser = async (profile: Profile, draftText?: string) => {
+    if (clientLauncher) {
+      setBusy(profile.id);
+      try {
+        const message = await launchOnMac(clientLauncher, () =>
+          request(`/api/profiles/${profile.id}/launcher-ticket`, "POST", {}),
+        );
+        setToast({ text: message });
+        return true;
+      } catch (error) {
+        setToast({ text: (error as Error).message, error: true });
+        return false;
+      } finally {
+        setBusy("");
+      }
+    }
     try {
       if (!profile.running)
         await mutate(
@@ -720,7 +740,12 @@ function App({
                   </td>
                   {!preview && (
                     <td>
-                      {profile ? (
+                      {profile && clientLauncher ? (
+                        <div className="cell-stack">
+                          <span>{profile.width} × {profile.height}</span>
+                          <small>语言、时区和显示偏好跟随本机 Chrome</small>
+                        </div>
+                      ) : profile ? (
                         <div className="cell-stack">
                           <span>
                             {profile.locale} · {profile.timezone}
@@ -735,7 +760,7 @@ function App({
                               ? "减少动效"
                               : "标准动效"}
                             {(profile.version || data.chromium?.version) &&
-                              ` · Chromium ${profile.version || data.chromium?.version}`}
+                              ` · ${data.macChromeLauncher ? "Chrome" : "Chromium"} ${profile.version || data.chromium?.version}`}
                           </small>
                         </div>
                       ) : (
@@ -746,7 +771,9 @@ function App({
                   <td>
                     <Badge tone={profile?.running ? "green" : "neutral"}>
                       {profile
-                        ? profile.running
+                        ? clientLauncher
+                          ? "在本机查看"
+                          : profile.running
                           ? "运行中"
                           : "已关闭"
                         : "待建窗口"}
@@ -1418,7 +1445,7 @@ function App({
                     )}
                     <div className="table-footer">
                       共 {data.proxies.length} 个代理
-                      <span>出口 IP 与延迟来自实际连接检查</span>
+                      <span>{clientLauncher ? "连通性检测由工作台服务发起" : "出口 IP 与延迟来自实际连接检查"}</span>
                     </div>
                   </section>
                 </>
@@ -1431,29 +1458,38 @@ function App({
                         <Icon icon={Monitor} size={21} />
                       </span>
                       <div className="engine-copy">
-                        <h2>
-                          {data.remoteBrowser
-                            ? "在线 Chromium"
-                            : "本地 Chromium"}
-                          <Badge
-                            tone={
-                              data.chromium?.installed ? "green" : "neutral"
-                            }
-                          >
-                            {data.chromium?.installed ? "已安装" : "未安装"}
-                          </Badge>
-                        </h2>
-                        <p>
-                          {data.chromium?.installed
-                            ? `真实版本 ${data.chromium.version || "待读取"}。每个账号使用独立目录保存会话。`
-                            : customer
-                              ? "服务器尚未安装浏览器，请联系管理员。"
-                              : "安装 Playwright 浏览器后，即可打开下方配置的独立环境。"}
-                        </p>
-                        {!data.chromium?.installed && !customer && (
-                          <code className="engine-command">
-                            npm run browser:install
-                          </code>
+                        {clientLauncher ? (
+                          <>
+                            <h2>本机 Chrome 启动器</h2>
+                            <p>首次使用请下载安装包并加载 Chrome 扩展，之后点击「打开 X」。</p>
+                            <a className="button secondary launcher-download" href={data.launcherDownload} download>
+                              <Icon icon={Download} size={16} />
+                              下载 macOS 启动器
+                            </a>
+                          </>
+                        ) : (
+                          <>
+                            <h2>
+                              {data.macChromeLauncher
+                                ? "本机 Chrome · 临时版"
+                                : data.remoteBrowser ? "在线 Chromium" : "本地 Chromium"}
+                              <Badge tone={data.chromium?.installed ? "green" : "neutral"}>
+                                {data.chromium?.installed ? "已安装" : "未安装"}
+                              </Badge>
+                            </h2>
+                            <p>
+                              {data.chromium?.installed
+                                ? `真实版本 ${data.chromium.version || "待读取"}。每个账号使用独立目录保存会话。`
+                                : data.macChromeLauncher
+                                  ? "在这台 Mac 上安装 Google Chrome 后即可打开窗口。"
+                                  : customer
+                                    ? "服务器尚未安装浏览器，请联系管理员。"
+                                    : "安装 Playwright 浏览器后，即可打开下方配置的独立环境。"}
+                            </p>
+                            {!data.chromium?.installed && !customer && !data.macChromeLauncher && (
+                              <code className="engine-command">npm run browser:install</code>
+                            )}
+                          </>
                         )}
                       </div>
                     </section>
@@ -1528,7 +1564,7 @@ function App({
                     <WindowTable />
                     <div className="table-footer">
                       共 {visibleWindows.length} 项
-                      <span>{working} 个窗口运行中</span>
+                      {!clientLauncher && <span>{working} 个窗口运行中</span>}
                     </div>
                   </section>
                 </>
@@ -1869,7 +1905,7 @@ function App({
                       </div>
                       <div>
                         <span>浏览器版本</span>
-                        <strong>Playwright 安装的 Chromium</strong>
+                        <strong>{clientLauncher ? "客户本机 Google Chrome" : "Chromium"}</strong>
                       </div>
                       <div>
                         <span>网络协议</span>
@@ -1921,6 +1957,7 @@ function App({
           account={windowCreator.account}
           proxies={data.proxies}
           chromiumVersion={data.chromium?.version}
+          macChromeLauncher={data.macChromeLauncher || Boolean(clientLauncher)}
           onClose={() => setWindowCreator(null)}
           onCreated={async (profile) => {
             setWindowCreator(null);
@@ -3333,10 +3370,12 @@ function RegionalSettingField({
 function WindowFingerprintFields({
   profile,
   version,
+  macChromeLauncher,
   disabled,
 }: {
   profile?: Profile;
   version?: string | null;
+  macChromeLauncher?: boolean;
   disabled: boolean;
 }) {
   const [region, setRegion] = useState("");
@@ -3353,8 +3392,11 @@ function WindowFingerprintFields({
   return (
     <>
       <h3 className="form-divider">
-        浏览器指纹{version && <span>Chromium {version}</span>}
+        浏览器指纹{version && <span>{macChromeLauncher ? "Chrome" : "Chromium"} {version}</span>}
       </h3>
+      {macChromeLauncher && (
+        <p className="field-hint">本机启动器应用窗口宽高。语言、时区和显示偏好由本机 Chrome 决定。</p>
+      )}
       <div className="window-region-control">
         <Field label="随机国家或地区">
           <select
@@ -3635,12 +3677,14 @@ function CreateWindowDialog({
   account,
   proxies,
   chromiumVersion,
+  macChromeLauncher,
   onClose,
   onCreated,
 }: {
   account?: Account;
   proxies: Proxy[];
   chromiumVersion?: string | null;
+  macChromeLauncher?: boolean;
   onClose: () => void;
   onCreated: (profile: Profile) => Promise<void>;
 }) {
@@ -3717,6 +3761,7 @@ function CreateWindowDialog({
           <div className="create-window-fingerprint">
             <WindowFingerprintFields
               version={chromiumVersion}
+              macChromeLauncher={macChromeLauncher}
               disabled={pending}
             />
           </div>
@@ -3964,6 +4009,7 @@ function EntityForm({
               <WindowFingerprintFields
                 profile={modal.item}
                 version={data.chromium?.version}
+                macChromeLauncher={data.macChromeLauncher || Boolean(data.launcherExtensionId)}
                 disabled={!!pending}
               />
             </>

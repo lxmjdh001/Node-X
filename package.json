@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "tsx watch server/index.ts --dev",
     "start": "tsx server/index.ts",
+    "launcher:mac": "tsx server/index.ts --mac-launcher",
+    "launcher:build": "node launcher/package.mjs",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "browser:install": "playwright install chromium"
@@ -36,6 +38,7 @@
     "@types/react-dom": "^19.3.0",
     "@types/twitter-text": "^3.1.10",
     "@vitejs/plugin-react": "^5.2.0",
+    "esbuild": "0.28.2",
     "typescript": "^5.9.3",
     "vite": "^7.3.8"
   }

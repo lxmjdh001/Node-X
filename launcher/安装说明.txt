@@ -1,0 +1,14 @@
+Node X Mac 启动器
+
+准备
+需要 macOS、Google Chrome 和 Node.js 22 或更新版本。
+Node.js 官方下载地址为 https://nodejs.org/ 。
+
+安装
+1. 将 ZIP 解压。在终端输入 bash 和一个空格，将 install-mac.command 拖入终端后回车。
+2. 打开 chrome://extensions，开启「开发者模式」。
+3. 点「加载已解压的扩展程序」，选择安装命令输出的 extension 文件夹。
+4. 回到 Node X 工作台，在窗口管理页点「打开 X」。首次请在独立 Chrome 窗口中手动登录。
+
+每个客户空间下的窗口都有单独的浏览器资料目录。关闭并重开同一窗口时，Chrome 使用原先保存的登录会话。
+窗口使用其绑定的 SOCKS5。临时安装版为手动加载扩展的 macOS 版本。
