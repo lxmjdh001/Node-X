@@ -12,7 +12,13 @@ export const modelProviders = {
   deepseek: chat('DeepSeek', 'https://api.deepseek.com', 'deepseek-flash', 'deepseek-v4-pro'),
   qwen: chat('阿里云 · 通义千问（中国内地）', 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3.8-flash', 'qwen-plus', 'qwen-max', 'qwen-turbo'),
   qwenIntl: chat('阿里云 · 通义千问（国际）', 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', 'qwen3.8-flash', 'qwen-plus', 'qwen-max', 'qwen-turbo'),
-  fnewapi: chat('第三方 · FNewAPI（顺奥）', 'https://subapis.gzshunao.com/v1', 'qwen3.8-flash', 'qwen3.8-max', 'qwen3.7-flash'),
+  fnewapi: chat('第三方 · FNewAPI（Chat Completions）', 'https://subapis.gzshunao.com/v1', 'qwen3.8-flash', 'qwen3.8-max', 'qwen3.7-flash'),
+  fnewapiResponses: {
+    name: '第三方 · FNewAPI（Responses）',
+    endpoint: 'https://subapis.gzshunao.com/v1/responses',
+    protocol: 'responses',
+    models: ['qwen3.8-flash', 'qwen3.8-max', 'qwen3.7-flash'],
+  },
   kimi: chat('月之暗面 · Kimi（中国内地）', 'https://api.moonshot.cn/v1', 'kimi-k3.1-pro', 'kimi-k2.5'),
   kimiIntl: chat('月之暗面 · Kimi（国际）', 'https://api.moonshot.ai/v1', 'kimi-k3.1-pro', 'kimi-k2.5'),
   bigmodel: chat('智谱 · GLM（中国内地）', 'https://open.bigmodel.cn/api/paas/v4', 'glm-5.3', 'glm-4.7-flash'),
@@ -47,4 +53,12 @@ export function isModelProvider(value: string): value is ModelProviderId {
 
 export function isQwenProvider(provider: ModelProviderId): provider is 'qwen' | 'qwenIntl' {
   return provider === 'qwen' || provider === 'qwenIntl';
+}
+
+export function isFnewApiProvider(provider: ModelProviderId): provider is 'fnewapi' | 'fnewapiResponses' {
+  return provider === 'fnewapi' || provider === 'fnewapiResponses';
+}
+
+export function sharesModelCredentials(left: ModelProviderId, right: ModelProviderId): boolean {
+  return left === right || (isFnewApiProvider(left) && isFnewApiProvider(right));
 }

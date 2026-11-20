@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
-import { isQwenProvider, type ModelProviderId, type ModelScope } from '../src/model-catalog.js';
+import { isFnewApiProvider, isQwenProvider, sharesModelCredentials, type ModelProviderId, type ModelScope } from '../src/model-catalog.js';
 import { InputError } from './errors.js';
 import { configuredModel, modelById, modelSettings, modelStore, providerInput, runModel, setModelDefault } from './models.js';
 import { seal } from './store.js';
@@ -19,7 +19,7 @@ const modelUpdate = z.object({
 const defaultInput = z.object({ purpose: z.enum(['writing', 'publishing']), modelId: z.uuid().nullable() });
 
 function validateModel(provider: ModelProviderId, model: string) {
-  if (provider === 'fnewapi' && /^qwen-mt-(flash|plus)$/i.test(model)) {
+  if (isFnewApiProvider(provider) && /^qwen-mt-(flash|plus)$/i.test(model)) {
     throw new InputError('这是翻译模型。写作或发布审核请选择 qwen3.8-flash 等对话模型。');
   }
 }
@@ -52,7 +52,7 @@ export function modelRoutes(scope: ModelScope) {
     const input = modelUpdate.parse(req.body);
     const provider = input.provider ?? current.provider;
     const switching = provider !== current.provider;
-    if (switching && !input.apiKey) throw new InputError('更换服务商时，请填写新服务商的 API Key。');
+    if (!sharesModelCredentials(provider, current.provider) && !input.apiKey) throw new InputError('更换服务商时，请填写新服务商的 API Key。');
     validateModel(provider, input.model);
     const { database, models } = modelStore(scope);
     if (database.prepare(`SELECT 1 FROM ${models} WHERE provider = ? AND model = ? AND id != ?`).get(provider, input.model, current.id)) {

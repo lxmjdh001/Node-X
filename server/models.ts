@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isModelProvider, isQwenProvider, modelProviders, type ModelProviderId, type ModelPurpose, type ModelScope, type ModelSettings, type SharedModel, type WorkspaceModel } from '../src/model-catalog.js';
+import { isFnewApiProvider, isModelProvider, isQwenProvider, modelProviders, type ModelProviderId, type ModelPurpose, type ModelScope, type ModelSettings, type SharedModel, type WorkspaceModel } from '../src/model-catalog.js';
 import { InputError, requireFound } from './errors.js';
 import { db, isCustomerWorkspace, reveal, workspaceDb } from './store.js';
 
@@ -150,7 +150,10 @@ export function activeModel(purpose: ModelPurpose): ActiveModel | undefined {
 
 const textParts = z.array(z.object({ type: z.string(), text: z.string().optional() }));
 const messagesResult = z.object({ content: textParts });
-const responsesResult = z.object({ output: z.array(z.object({ type: z.string(), content: textParts.optional() })) });
+const responsesResult = z.object({
+  status: z.string().optional(),
+  output: z.array(z.object({ type: z.string(), content: textParts.optional() })).optional(),
+});
 const chatResult = z.object({ choices: z.array(z.object({ message: z.object({ content: z.string().nullable() }) })) });
 
 export async function runModel(
@@ -166,9 +169,13 @@ export async function runModel(
     body = { model, system, messages, max_tokens: maxTokens };
   } else {
     headers.Authorization = 'Bearer ' + config.apiKey;
-    body = config.protocol === 'responses'
-      ? { model, input: [{ role: 'system', content: system }, ...messages], max_output_tokens: maxTokens, store: false }
-      : { model, messages: [{ role: 'system', content: system }, ...messages], max_tokens: maxTokens, ...config.chatOptions };
+    if (config.provider === 'fnewapiResponses') {
+      body = { model, instructions: system, input: prompt, max_output_tokens: maxTokens, stream: false, store: false };
+    } else if (config.protocol === 'responses') {
+      body = { model, input: [{ role: 'system', content: system }, ...messages], max_output_tokens: maxTokens, store: false };
+    } else {
+      body = { model, messages: [{ role: 'system', content: system }, ...messages], max_tokens: maxTokens, ...config.chatOptions };
+    }
   }
   let response: Response;
   let text: string | null | undefined;
@@ -178,22 +185,31 @@ export async function runModel(
     });
     if (response.ok) {
       const data: unknown = await response.json();
-      text = config.protocol === 'messages'
-        ? messagesResult.parse(data).content.filter(part => part.type === 'text').map(part => part.text).join('')
-        : config.protocol === 'responses'
-          ? responsesResult.parse(data).output.filter(item => item.type === 'message')
-            .flatMap(item => item.content ?? []).filter(part => part.type === 'output_text').map(part => part.text).join('')
-          : chatResult.parse(data).choices[0]?.message.content;
+      if (config.protocol === 'responses') {
+        const result = responsesResult.parse(data);
+        if (config.provider === 'fnewapiResponses' && result.status && result.status !== 'completed') {
+          throw new InputError(result.status === 'incomplete'
+            ? 'FNewAPI Responses 返回的正文未完成。请缩短请求或换用其他模型。'
+            : 'FNewAPI Responses 未能完成这次请求。', 502);
+        }
+        text = result.output?.filter(item => item.type === 'message')
+          .flatMap(item => item.content ?? []).filter(part => part.type === 'output_text').map(part => part.text).join('');
+      } else if (config.protocol === 'messages') {
+        text = messagesResult.parse(data).content.filter(part => part.type === 'text').map(part => part.text).join('');
+      } else {
+        text = chatResult.parse(data).choices[0]?.message.content;
+      }
     } else {
       await response.body?.cancel();
     }
   } catch (error) {
+    if (error instanceof InputError) throw error;
     const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
     throw new InputError(timedOut ? '模型响应超时，请重试或切换模型。' : '无法读取模型响应，请检查服务网络或更换模型。', 502);
   }
   if (!response.ok) {
     const { status } = response;
-    if (config.provider === 'fnewapi') {
+    if (config.provider && isFnewApiProvider(config.provider)) {
       if (status === 401) throw new InputError('FNewAPI 未接受此 API Key。请确认使用第三方平台签发的有效 Key。', 422);
       if (status === 403 || status === 404) throw new InputError('FNewAPI 拒绝访问此模型。请核对模型 ID，并检查账号和 Key 的模型权限。', 422);
     }

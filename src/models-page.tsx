@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Pencil, Plus, Trash2 } from "lucide-react";
-import { isQwenProvider, modelProviders, type ModelProviderId, type ModelPurpose, type ModelSettings, type WorkspaceModel } from "./model-catalog";
+import { isFnewApiProvider, isQwenProvider, modelProviders, sharesModelCredentials, type ModelProviderId, type ModelPurpose, type ModelSettings, type WorkspaceModel } from "./model-catalog";
 import { Button, Dialog, Field, IconButton } from "./ui";
 
 type ModelRequest = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
@@ -152,7 +152,7 @@ function ModelForm({ item, global, requestModel, onClose, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const entry = modelProviders[provider];
-  const needsKey = !item || item.provider !== provider;
+  const needsKey = !item || !sharesModelCredentials(item.provider, provider);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -206,7 +206,7 @@ function ModelForm({ item, global, requestModel, onClose, onSaved }: {
           )}
           <Field label="API Key" hint={item && needsKey ? "请填写新服务商签发的 API Key。" : !needsKey
             ? "留空可保留已保存的 API Key。"
-            : provider === "fnewapi" ? "填写顺奥第三方平台签发的 API Key。"
+            : isFnewApiProvider(provider) ? "填写顺奥第三方平台签发的 API Key。"
             : global ? "密钥由服务端加密保存。全局调用使用这个 API Key 的额度。"
             : "API Key 加密保存在当前工作空间。"}>
             <input type="password" autoComplete="new-password" autoFocus={!!item} required={needsKey}
