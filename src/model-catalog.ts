@@ -12,6 +12,7 @@ export const modelProviders = {
   deepseek: chat('DeepSeek', 'https://api.deepseek.com', 'deepseek-flash', 'deepseek-v4-pro'),
   qwen: chat('阿里云 · 通义千问（中国内地）', 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3.8-flash', 'qwen-plus', 'qwen-max', 'qwen-turbo'),
   qwenIntl: chat('阿里云 · 通义千问（国际）', 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', 'qwen3.8-flash', 'qwen-plus', 'qwen-max', 'qwen-turbo'),
+  fnewapi: chat('第三方 · FNewAPI（顺奥）', 'https://subapis.gzshunao.com/v1', 'qwen3.8-flash', 'qwen3.8-max', 'qwen3.7-flash'),
   kimi: chat('月之暗面 · Kimi（中国内地）', 'https://api.moonshot.cn/v1', 'kimi-k3.1-pro', 'kimi-k2.5'),
   kimiIntl: chat('月之暗面 · Kimi（国际）', 'https://api.moonshot.ai/v1', 'kimi-k3.1-pro', 'kimi-k2.5'),
   bigmodel: chat('智谱 · GLM（中国内地）', 'https://open.bigmodel.cn/api/paas/v4', 'glm-5.3', 'glm-4.7-flash'),

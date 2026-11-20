@@ -10,7 +10,8 @@ type ActiveModel = {
   apiKey: string;
   endpoint: string;
   protocol: 'chat' | 'messages' | 'responses';
-  chatOptions?: { enable_thinking: false };
+  provider?: ModelProviderId;
+  chatOptions?: { enable_thinking?: false; stream?: false };
 };
 
 function legacyModel() {
@@ -130,10 +131,14 @@ export function configuredModel(scope: ModelScope, id: string): ActiveModel {
     const region = config.provider === 'qwen' ? 'cn-beijing' : 'ap-southeast-1';
     endpoint = `https://${config.providerWorkspace}.${region}.maas.aliyuncs.com/compatible-mode/v1/chat/completions`;
   }
-  const qwenFlash = isQwenProvider(config.provider) && /^qwen3\.8-flash(?:-|$)/.test(config.model);
+  const gateway = config.provider === 'fnewapi';
+  const qwenFlash = (gateway || isQwenProvider(config.provider)) && /^qwen3\.8-flash(?:-|$)/.test(config.model);
   return {
-    ...provider, endpoint, model: config.model, apiKey: reveal(config.encryptedKey),
-    ...(qwenFlash ? { chatOptions: { enable_thinking: false } } : {}),
+    ...provider, endpoint, model: config.model, apiKey: reveal(config.encryptedKey), provider: config.provider,
+    chatOptions: {
+      ...(gateway ? { stream: false } : {}),
+      ...(qwenFlash ? { enable_thinking: false } : {}),
+    },
   };
 }
 
@@ -188,6 +193,10 @@ export async function runModel(
   }
   if (!response.ok) {
     const { status } = response;
+    if (config.provider === 'fnewapi') {
+      if (status === 401) throw new InputError('FNewAPI 未接受此 API Key。请确认使用第三方平台签发的有效 Key。', 422);
+      if (status === 403 || status === 404) throw new InputError('FNewAPI 拒绝访问此模型。请核对模型 ID，并检查账号和 Key 的模型权限。', 422);
+    }
     if (status === 401 || status === 403) throw new InputError('模型服务拒绝了 API Key 或模型权限。', 422);
     if (status === 402 || status === 429) throw new InputError('模型服务额度不足或触发了频率限制。', 429);
     if (status === 400 || status === 404) throw new InputError('模型服务未接受请求，请核对模型 ID、所选地区和模型权限。', 422);

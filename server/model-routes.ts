@@ -13,8 +13,16 @@ const keyInput = z.string().trim().min(1, '请输入 API Key。').max(2048)
 const workspaceInput = z.string().trim().toLowerCase()
   .regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/, '百炼工作空间 ID 只能包含英文字母、数字和连字符。');
 const modelCreate = z.object({ provider: providerInput, model: modelInput, apiKey: keyInput, providerWorkspace: workspaceInput.optional() });
-const modelUpdate = z.object({ model: modelInput, apiKey: keyInput.optional(), providerWorkspace: workspaceInput.nullable().optional() });
+const modelUpdate = z.object({
+  provider: providerInput.optional(), model: modelInput, apiKey: keyInput.optional(), providerWorkspace: workspaceInput.nullable().optional(),
+});
 const defaultInput = z.object({ purpose: z.enum(['writing', 'publishing']), modelId: z.uuid().nullable() });
+
+function validateModel(provider: ModelProviderId, model: string) {
+  if (provider === 'fnewapi' && /^qwen-mt-(flash|plus)$/i.test(model)) {
+    throw new InputError('这是翻译模型。写作或发布审核请选择 qwen3.8-flash 等对话模型。');
+  }
+}
 
 function providerWorkspace(provider: ModelProviderId, value: string | null | undefined) {
   if (value && !isQwenProvider(provider)) throw new InputError('当前服务商无需百炼工作空间 ID。');
@@ -29,6 +37,7 @@ export function modelRoutes(scope: ModelScope) {
 
   routes.post('/models', (req, res) => {
     const input = modelCreate.parse(req.body);
+    validateModel(input.provider, input.model);
     const { database, models } = modelStore(scope);
     if (database.prepare(`SELECT 1 FROM ${models} WHERE provider = ? AND model = ?`).get(input.provider, input.model)) {
       throw new InputError('这个模型已经添加，可编辑它的 API Key。', 409);
@@ -41,13 +50,18 @@ export function modelRoutes(scope: ModelScope) {
   routes.patch('/models/:id', (req, res) => {
     const current = modelById(scope, req.params.id);
     const input = modelUpdate.parse(req.body);
+    const provider = input.provider ?? current.provider;
+    const switching = provider !== current.provider;
+    if (switching && !input.apiKey) throw new InputError('更换服务商时，请填写新服务商的 API Key。');
+    validateModel(provider, input.model);
     const { database, models } = modelStore(scope);
-    if (database.prepare(`SELECT 1 FROM ${models} WHERE provider = ? AND model = ? AND id != ?`).get(current.provider, input.model, current.id)) {
+    if (database.prepare(`SELECT 1 FROM ${models} WHERE provider = ? AND model = ? AND id != ?`).get(provider, input.model, current.id)) {
       throw new InputError('这个模型已经添加。', 409);
     }
-    const workspace = input.providerWorkspace === undefined ? current.providerWorkspace : providerWorkspace(current.provider, input.providerWorkspace);
-    database.prepare(`UPDATE ${models} SET model = ?, encryptedKey = ?, providerWorkspace = ? WHERE id = ?`)
-      .run(input.model, input.apiKey === undefined ? current.encryptedKey : seal(input.apiKey), workspace, current.id);
+    const workspace = !switching && input.providerWorkspace === undefined
+      ? current.providerWorkspace : providerWorkspace(provider, input.providerWorkspace);
+    database.prepare(`UPDATE ${models} SET provider = ?, model = ?, encryptedKey = ?, providerWorkspace = ? WHERE id = ?`)
+      .run(provider, input.model, input.apiKey === undefined ? current.encryptedKey : seal(input.apiKey), workspace, current.id);
     res.json(modelSettings(scope));
   });
 

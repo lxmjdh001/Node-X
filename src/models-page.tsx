@@ -152,6 +152,7 @@ function ModelForm({ item, global, requestModel, onClose, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const entry = modelProviders[provider];
+  const needsKey = !item || item.provider !== provider;
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -175,12 +176,13 @@ function ModelForm({ item, global, requestModel, onClose, onSaved }: {
       <form onSubmit={save}>
         <div className="dialog-body">
           <Field label="服务商">
-            <select autoFocus={!item} disabled={!!item || busy} value={provider} onChange={event => {
+            <select autoFocus={!item} disabled={busy} value={provider} onChange={event => {
               const next = event.target.value as ModelProviderId;
               setProvider(next);
-              setModel(modelProviders[next].models[0] ?? "");
+              const presets = modelProviders[next].models;
+              if (!presets.includes(model)) setModel(presets[0] ?? "");
               setKey("");
-              setProviderWorkspace("");
+              setProviderWorkspace(item?.provider === next ? item.providerWorkspace ?? "" : "");
             }}>
               {Object.entries(modelProviders).map(([id, value]) => <option key={id} value={id}>{value.name}</option>)}
             </select>
@@ -202,17 +204,19 @@ function ModelForm({ item, global, requestModel, onClose, onSaved }: {
                 onChange={event => setProviderWorkspace(event.target.value)} />
             </Field>
           )}
-          <Field label="API Key" hint={item ? "留空可保留已保存的 API Key。" : global
-            ? "密钥由服务端加密保存。全局调用使用这个 API Key 的额度。"
+          <Field label="API Key" hint={item && needsKey ? "请填写新服务商签发的 API Key。" : !needsKey
+            ? "留空可保留已保存的 API Key。"
+            : provider === "fnewapi" ? "填写顺奥第三方平台签发的 API Key。"
+            : global ? "密钥由服务端加密保存。全局调用使用这个 API Key 的额度。"
             : "API Key 加密保存在当前工作空间。"}>
-            <input type="password" autoComplete="new-password" autoFocus={!!item} required={!item}
+            <input type="password" autoComplete="new-password" autoFocus={!!item} required={needsKey}
               maxLength={2048} disabled={busy} value={key} onChange={event => setKey(event.target.value)} />
           </Field>
           {error && <p className="form-error" role="alert">{error}</p>}
         </div>
         <div className="dialog-footer">
           <Button type="button" disabled={busy} onClick={onClose}>取消</Button>
-          <Button type="submit" variant="primary" busy={busy} disabled={busy || !model.trim() || (!item && !key.trim())}>保存模型</Button>
+          <Button type="submit" variant="primary" busy={busy} disabled={busy || !model.trim() || (needsKey && !key.trim())}>保存模型</Button>
         </div>
       </form>
     </Dialog>
