@@ -1871,9 +1871,9 @@ function App({
           aiConfigured={data.settings.aiConfigured}
           onClose={() => setPostImportOpen(false)}
           onCreated={async (count) => {
-            setPostImportOpen(false);
             setDraftFilter("pending");
             await refreshPendingPosts();
+            setPostImportOpen(false);
             setToast({ text: `已将 ${count} 条文案加入待发布列表。` });
           }}
         />
@@ -3752,10 +3752,14 @@ function PostImportDialog({
   const [url, setUrl] = useState("");
   const [text, setText] = useState("");
   const [count, setCount] = useState("3");
-  const [busy, setBusy] = useState<"source" | "generate" | "">("");
+  const [busy, setBusy] = useState<"source" | "generate" | "refresh" | "">("");
   const [error, setError] = useState("");
   const number = Number(count);
   const countValid = Boolean(count) && Number.isInteger(number) && number >= 0 && number <= MAX_VARIANTS;
+  const progressLabel = busy === "source" ? "正在读取原帖正文…"
+    : busy === "refresh" ? "文案已保存，正在更新待发布列表…"
+    : busy === "generate" ? number > 0 ? `正在生成 ${number} 条相似稿…` : "正在保存原文…"
+    : "";
 
   async function readLink() {
     setError("");
@@ -3773,13 +3777,14 @@ function PostImportDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!countValid || (!text.trim() && !url.trim())) return;
+    if (busy || !countValid || (!text.trim() && !url.trim())) return;
     setError("");
     setBusy("generate");
     try {
       const { count: created } = await request("/api/pending-posts", "POST", {
         id, text: text || undefined, url: url.trim() || undefined, count: number,
       }) as { count: number };
+      setBusy("refresh");
       await onCreated(created);
     } catch (error) {
       setError((error as Error).message);
@@ -3819,7 +3824,8 @@ function PostImportDialog({
             : "未设置写作模型时，示例模式仅调整标题和排版。"}</small>
           {error && <p className="form-error" role="alert">{error}</p>}
         </div>
-        <div className="dialog-footer">
+        <div className="dialog-footer post-import-footer">
+          {progressLabel && <PostImportProgress label={progressLabel} />}
           <Button type="button" onClick={onClose} disabled={!!busy}>取消</Button>
           <Button type="submit" variant="primary" icon={Sparkles} disabled={!!busy || !countValid || !text.trim() && !url.trim()}
             busy={busy === "generate"}>
@@ -3828,6 +3834,27 @@ function PostImportDialog({
         </div>
       </form>
     </Dialog>
+  );
+}
+
+function PostImportProgress({ label }: { label: string }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const startedAt = performance.now();
+    const timer = window.setInterval(() => {
+      setElapsed(Math.floor((performance.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <section className="post-import-progress">
+      <div className="post-import-progress-label">
+        <span role="status">{label}</span>
+        <small aria-hidden="true">已等待 {elapsed} 秒</small>
+      </div>
+      <div className="post-import-progress-track" role="progressbar" aria-label="处理进度" />
+    </section>
   );
 }
 

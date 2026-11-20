@@ -3833,6 +3833,61 @@ td strong {
   margin-top: 23px;
 }
 
+.post-import-footer {
+  flex-wrap: wrap;
+}
+
+.post-import-progress {
+  flex: 0 0 100%;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.post-import-progress-label {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.post-import-progress-label small {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.post-import-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--blue-soft);
+}
+
+.post-import-progress-track::after {
+  content: "";
+  display: block;
+  width: 35%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  animation: post-import-progress 1.15s ease-in-out infinite alternate;
+}
+
+@keyframes post-import-progress {
+  from { transform: translateX(0); }
+  to { transform: translateX(185%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .post-import-progress-track::after {
+    animation: none;
+    margin-inline: auto;
+  }
+}
+
 .post-queue-toolbar,
 .post-queue-meta {
   display: flex;
