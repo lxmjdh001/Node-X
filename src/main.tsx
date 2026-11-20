@@ -448,12 +448,14 @@ function App({
   const run = (key: string, path: string, success: string) => {
     void mutate(key, path, "POST", undefined, success).catch(() => {});
   };
-  const openBrowser = async (profile: Profile, draftText?: string) => {
+  const openBrowser = async (profile: Profile, draft?: Draft) => {
     if (clientLauncher) {
       setBusy(profile.id);
       try {
-        const message = await launchOnMac(clientLauncher, () =>
-          request(`/api/profiles/${profile.id}/launcher-ticket`, "POST", {}),
+        const message = await launchOnMac(
+          clientLauncher,
+          () => request(`/api/profiles/${profile.id}/launcher-ticket`, "POST", { draftId: draft?.id }),
+          draft ? "open-composer" : "open",
         );
         setToast({ text: message });
         void refresh();
@@ -466,15 +468,15 @@ function App({
       }
     }
     try {
-      if (!profile.running)
+      if (!profile.running || draft)
         await mutate(
           profile.id,
           `/api/profiles/${profile.id}/start`,
           "POST",
-          undefined,
-          "浏览器环境已打开",
+          draft ? { draftId: draft.id } : undefined,
+          draft ? "已打开 X 发帖页，请核对账号和正文后发布。" : "浏览器环境已打开",
         );
-      if (data.remoteBrowser) setViewingBrowser({ profile, draftText });
+      if (data.remoteBrowser) setViewingBrowser({ profile, draftText: draft?.text });
       return true;
     } catch {
       // mutate has already shown the error.
@@ -492,22 +494,7 @@ function App({
       });
       return;
     }
-    if (data.remoteBrowser) {
-      await openBrowser(profile, draft.text);
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(draft.text);
-    } catch {
-      setToast({
-        text: "复制失败，请先在编辑页选中正文并手动复制。",
-        error: true,
-      });
-      return;
-    }
-    if (await openBrowser(profile)) {
-      setToast({ text: "正文已复制。请在 X 网页粘贴并确认发布。" });
-    }
+    await openBrowser(profile, draft);
   };
   const accountName = (id: string) =>
     data.accounts.find((a) => a.id === id)?.label || "未关联账号";
@@ -1774,7 +1761,7 @@ function App({
                                           AI 审核
                                         </Button>
                                       )}
-                                      {data.settings.xConfigured ? (
+                                      {data.settings.xConfigured && (
                                         <Button
                                           icon={Send}
                                           disabled={
@@ -1787,9 +1774,10 @@ function App({
                                         >
                                           发布
                                         </Button>
-                                      ) : (
+                                      )}
+                                      {(!data.settings.xConfigured || data.profiles.some(item => item.accountId === draft.accountId)) && (
                                         <Button
-                                          icon={Copy}
+                                          icon={ExternalLink}
                                           disabled={
                                             !draft.text.trim() ||
                                             data.profiles.some(
@@ -1803,9 +1791,7 @@ function App({
                                             void openDraftInX(draft)
                                           }
                                         >
-                                          {data.remoteBrowser
-                                            ? "打开 X 发文"
-                                            : "复制并打开 X"}
+                                          打开 X 预填正文
                                         </Button>
                                       )}
                                     </>
@@ -1832,7 +1818,7 @@ function App({
                     <Icon icon={ShieldCheck} size={14} />
                     {data.settings.xConfigured
                       ? "发布前请确认目标账号和正文。定时发布需要 Node X 服务持续运行。"
-                      : "在 X 网页确认账号和正文后，手动点击发布。"}
+                      : "打开 X 后核对预填正文与账号，再确认发布。"}
                   </p>
                 </>
               )}

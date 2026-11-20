@@ -1,20 +1,29 @@
+type LaunchMode = 'open' | 'open-composer';
 type Reply = { success?: boolean; message?: string };
 type ChromeRuntime = {
   lastError?: { message?: string };
-  sendMessage: (extension: string, data: { type: 'open'; ticket: string }, callback: (reply?: Reply) => void) => void;
+  sendMessage: (extension: string, data: { type: LaunchMode; ticket: string }, callback: (reply?: Reply) => void) => void;
 };
 
-export async function launchOnMac(extension: string, issueTicket: () => Promise<{ ticket: string }>): Promise<string> {
+export async function launchOnMac(
+  extension: string,
+  issueTicket: () => Promise<{ ticket: string }>,
+  mode: LaunchMode = 'open',
+): Promise<string> {
   const runtime = (window as Window & { chrome?: { runtime?: ChromeRuntime } }).chrome?.runtime;
-  const missing = '请用 Mac 上的 Google Chrome 打开工作台，并安装本机启动器扩展。';
+  const missing = mode === 'open-composer'
+    ? '请下载新版 Mac 启动器，运行安装脚本并重新加载 Chrome 扩展。'
+    : '请用 Mac 上的 Google Chrome 打开工作台，并安装本机启动器扩展。';
   if (!runtime?.sendMessage) throw new Error(missing);
   const { ticket } = await issueTicket();
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('等待本机启动器响应超时，请检查安装后重试。')), 26_000);
     try {
-      runtime.sendMessage(extension, { type: 'open', ticket }, (reply) => {
+      runtime.sendMessage(extension, { type: mode, ticket }, (reply) => {
         clearTimeout(timeout);
         if (runtime.lastError) {
+          reject(new Error(missing));
+        } else if (mode === 'open-composer' && reply?.message === '无法识别启动请求。') {
           reject(new Error(missing));
         } else if (!reply?.success) {
           reject(new Error(reply?.message || '本机启动器未接收请求，请检查安装后重试。'));

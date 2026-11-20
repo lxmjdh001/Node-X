@@ -19,6 +19,7 @@ const checkingProxies = new Set<string>();
 const busyProfiles = new Set<string>();
 const now = () => new Date().toISOString();
 const ok = { ok: true };
+const openProfileInput = z.object({ draftId: z.uuid().optional() });
 const operationKey = (id: string) => `${workspaceId() ?? 'owner'}:${id}`;
 const pointer = { x: z.number().min(0).max(1), y: z.number().min(0).max(1) };
 const browserInput = z.discriminatedUnion('type', [
@@ -50,11 +51,23 @@ export const profileById = (id: string) => requireFound(row<Profile>('SELECT * F
 export const openProxy = (proxy: Proxy) => ({
   host: proxy.host, port: proxy.port, username: proxy.username, password: proxy.password ? reveal(proxy.password) : '',
 });
-export function launcherProfile(id: string) {
+function draftTextForProfile(profile: Profile, draftId: string) {
+  const draft = requireFound(row<{ text: string; status: string }>(
+    "SELECT text, status FROM drafts WHERE id = ? AND accountId = ?", draftId, profile.accountId,
+  ), '找不到该账号的草稿。');
+  if (draft.status !== 'draft' && draft.status !== 'error') {
+    throw new InputError('请打开尚未发布的草稿。', 409);
+  }
+  if (!draft.text.trim()) throw new InputError('请先填写草稿正文。');
+  return draft.text;
+}
+
+export function launcherProfile(id: string, draftId?: string) {
   const profile = profileById(id);
   return {
     workspace: workspaceId() ?? 'owner', profile: profile.id,
     width: profile.width, height: profile.height, proxy: openProxy(proxyById(profile.proxyId)),
+    ...(draftId ? { draftText: draftTextForProfile(profile, draftId) } : {}),
   };
 }
 const pendingFor = (id: string) =>
@@ -324,18 +337,23 @@ workspace.delete('/profiles/:id', async (req, res) => {
 });
 
 workspace.post('/profiles/:id/launcher-ticket', (req, res) => {
-  issueLauncherTicket(req, res, profileById(req.params.id).id);
+  const profile = profileById(req.params.id);
+  const { draftId } = openProfileInput.parse(req.body ?? {});
+  if (draftId) draftTextForProfile(profile, draftId);
+  issueLauncherTicket(req, res, profile.id, draftId);
 });
 
 workspace.post('/profiles/:id/start', async (req, res) => {
   if (clientLauncher) throw new InputError('请使用 Chrome 本机启动器打开 X。', 409);
   const profile = profileById(req.params.id);
-  ensureProfileFree(profile.id);
+  const { draftId } = openProfileInput.parse(req.body ?? {});
+  const draftText = draftId ? draftTextForProfile(profile, draftId) : undefined;
+  ensureProfileFree(profile.id, Boolean(draftId));
   const key = operationKey(profile.id);
   busyProfiles.add(key);
   try {
     try {
-      await startBrowser({ ...profile, proxy: openProxy(proxyById(profile.proxyId)) });
+      await startBrowser({ ...profile, proxy: openProxy(proxyById(profile.proxyId)) }, draftText);
     } catch (error) {
       if (error instanceof InputError) throw error;
       const message = error instanceof Error ? error.message : '浏览器启动失败。';

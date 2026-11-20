@@ -257,7 +257,7 @@ export function BrowserView({
             rows={3}
             value={draftText}
           />
-          <p>先在 X 画面中选中发文框，再填入草稿。</p>
+          <p>需要重新填入正文时，先在 X 画面中选中发文框。</p>
           <button
             className="button primary"
             disabled={!src}

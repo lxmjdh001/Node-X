@@ -9,6 +9,7 @@ import { runInWorkspace, workspaceId } from './store.js';
 type Ticket = {
   workspace: string | undefined;
   profile: string;
+  draftId?: string;
   authorized: () => boolean;
   expires: number;
 };
@@ -21,7 +22,7 @@ export const launcherDownload = `${installer}?v=${launcherConfig.version}`;
 const tickets = new Map<string, Ticket>();
 const ticketMs = 60_000;
 
-export function issueLauncherTicket(req: Request, res: Response, profile: string) {
+export function issueLauncherTicket(req: Request, res: Response, profile: string, draftId?: string) {
   if (!clientLauncher) throw new InputError('本机启动器未启用。', 404);
   const now = Date.now();
   for (const [key, ticket] of tickets) {
@@ -31,11 +32,11 @@ export function issueLauncherTicket(req: Request, res: Response, profile: string
   const outstanding = [...tickets.values()].filter((ticket) => ticket.workspace === workspace).length;
   if (outstanding >= 12 || tickets.size >= 4096) throw new InputError('启动请求过多，请稍等再试。', 429);
   const token = randomBytes(32).toString('base64url');
-  tickets.set(token, { profile, workspace, expires: now + ticketMs, authorized: sessionHasAccess(req) });
+  tickets.set(token, { profile, draftId, workspace, expires: now + ticketMs, authorized: sessionHasAccess(req) });
   res.json({ ticket: token });
 }
 
-export function redeemLauncherTicket(req: Request, res: Response, resolveProfile: (id: string) => object) {
+export function redeemLauncherTicket(req: Request, res: Response, resolveProfile: (id: string, draftId?: string) => object) {
   if (!clientLauncher) throw new InputError('本机启动器未启用。', 404);
   const { ticket } = req.body ?? {};
   if (typeof ticket !== 'string' || !ticketPattern.test(ticket)) throw new InputError('启动凭证无效。', 400);
@@ -44,6 +45,6 @@ export function redeemLauncherTicket(req: Request, res: Response, resolveProfile
   if (!issued || issued.expires <= Date.now() || !issued.authorized()) {
     throw new InputError('启动凭证已失效，请回到工作台重新打开。', 401);
   }
-  const settings = runInWorkspace(issued.workspace, () => resolveProfile(issued.profile));
+  const settings = runInWorkspace(issued.workspace, () => resolveProfile(issued.profile, issued.draftId));
   res.json({ ...settings, presenceToken: createPresenceToken(issued.workspace, issued.profile) });
 }

@@ -58,7 +58,7 @@ function reportPresence(token: string | undefined) {
   };
 }
 
-async function launch(ticket: string): Promise<string> {
+async function launch(ticket: string, compose: boolean): Promise<string> {
   const response = await fetch(new URL('/api/launcher/redeem', origin), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -72,7 +72,8 @@ async function launch(ticket: string): Promise<string> {
   }
   const result = launchPayload.safeParse(await response.json());
   if (!result.success) throw new LaunchError('工作台返回的窗口配置无效。');
-  const { workspace, profile, proxy, width, height, presenceToken } = result.data;
+  const { workspace, profile, proxy, width, height, presenceToken, draftText } = result.data;
+  if (compose !== Boolean(draftText)) throw new LaunchError('启动请求与草稿配置不匹配，请返回工作台重试。');
   const directory = join(root, workspace, profile);
   const version = createHash('sha256').update(JSON.stringify({ proxy, width, height })).digest('hex');
   const active = starting.get(directory);
@@ -81,14 +82,14 @@ async function launch(ticket: string): Promise<string> {
 
   const running = sessions.get(directory);
   if (running?.version === version) {
-    await running.chrome.show();
-    return '已打开该账号的本机 Chrome 窗口。';
+    await running.chrome.show(draftText);
+    return compose ? '已打开 X 发帖页，请核对账号和正文后发布。' : '已打开该账号的本机 Chrome 窗口。';
   }
   const start = (async () => {
     const upstream = await publicProxy(proxy);
     if (closing) throw new LaunchError('启动器已关闭，请重新打开工作台。');
     if (running) await running.chrome.close();
-    const chrome = await openMacChrome(directory, { width, height }, upstream);
+    const chrome = await openMacChrome(directory, { width, height }, upstream, draftText);
     const heartbeat = reportPresence(presenceToken);
     const closed = chrome.closed.then(async () => {
       if (sessions.get(directory) === session) sessions.delete(directory);
@@ -97,7 +98,7 @@ async function launch(ticket: string): Promise<string> {
     const session = { version, chrome, closed };
     sessions.set(directory, session);
     await heartbeat.ready;
-    return '已在本机打开 Chrome。';
+    return compose ? '已打开 X 发帖页，请核对账号和正文后发布。' : '已在本机打开 Chrome。';
   })();
   starting.set(directory, start);
   try {
@@ -116,12 +117,12 @@ async function onMessage(raw: Buffer) {
   } catch { return; }
   const { id, type, ticket } = message;
   if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/.test(id)) return;
-  if (type !== 'open' || typeof ticket !== 'string' || !ticketPattern.test(ticket)) {
+  if ((type !== 'open' && type !== 'open-composer') || typeof ticket !== 'string' || !ticketPattern.test(ticket)) {
     send({ id, success: false, message: '无法识别启动请求。' });
     return;
   }
   try {
-    send({ id, success: true, message: await launch(ticket) });
+    send({ id, success: true, message: await launch(ticket, type === 'open-composer') });
   } catch (error) {
     const failure = error instanceof LaunchError || error instanceof InputError
       ? error.message : '无法打开本机 Chrome。请检查 Chrome 安装状态，或退出之前的独立窗口后重试。';

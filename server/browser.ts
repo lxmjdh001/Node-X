@@ -10,6 +10,7 @@ import { chromium, type BrowserContext, type Page, type Response } from 'playwri
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { MAC_CHROME, openMacChrome } from '../launcher/chrome.js';
 import { workspaceAuthorized } from './auth.js';
+import { xComposeUrl } from '../src/x-compose.js';
 import { InputError } from './errors.js';
 import { createBridge, proxyUrl, PROXY_TIMEOUT_MS, type BrowserProxy, type ProxySettings } from './browser-proxy.js';
 import { publicProxy } from './public-proxy.js';
@@ -41,6 +42,7 @@ type BrowserSession = {
 type MacChromeSession = {
   version: string;
   workspaceId: string | undefined;
+  show: (draftText?: string) => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -237,13 +239,13 @@ async function openXPage(page: Page, url: string): Promise<void> {
   if (forbidden) throw new InputError('当前代理已连接，但 X 拒绝了网页访问（HTTP 403）。', 422);
 }
 
-async function startMacChrome(key: string, directory: string, profile: BrowserSettings, customerId: string | undefined) {
+async function startMacChrome(key: string, directory: string, profile: BrowserSettings, customerId: string | undefined, draftText?: string) {
   const { version } = await chromiumInfo();
   if (!version) throw new InputError('请先在此 Mac 安装 Google Chrome。', 503);
   const proxy = await publicProxy(profile.proxy);
   if (shuttingDown || !workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
-  const chrome = await openMacChrome(directory, profile, proxy);
-  const session: MacChromeSession = { version, workspaceId: customerId, close: chrome.close };
+  const chrome = await openMacChrome(directory, profile, proxy, draftText);
+  const session: MacChromeSession = { version, workspaceId: customerId, show: chrome.show, close: chrome.close };
   macSessions.set(key, session);
   void chrome.closed.finally(() => {
     if (macSessions.get(key) === session) macSessions.delete(key);
@@ -252,7 +254,7 @@ async function startMacChrome(key: string, directory: string, profile: BrowserSe
 }
 
 /** Opens an ordinary Chromium window for manual use. The actual engine supplies its own UA/version. */
-export async function startBrowser(profile: BrowserSettings): Promise<{ version: string }> {
+export async function startBrowser(profile: BrowserSettings, draftText?: string): Promise<{ version: string }> {
   profile = { ...profile, proxy: { ...profile.proxy } };
   validateProfile(profile);
   if (shuttingDown) throw new Error('服务正在关闭，请稍后重试。');
@@ -264,12 +266,27 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
     if (shuttingDown) throw new Error('服务正在关闭，请稍后重试。');
     if (macChromeLauncher) {
       const active = macSessions.get(key);
-      if (active) return { version: active.version };
-      return startMacChrome(key, directory, profile, customerId);
+      if (active) {
+        if (draftText) await active.show(draftText);
+        return { version: active.version };
+      }
+      return startMacChrome(key, directory, profile, customerId, draftText);
     }
     const existing = sessions.get(key);
     if (existing) {
-      await existing.context.pages()[0]?.bringToFront().catch(() => undefined);
+      if (draftText) {
+        const page = await existing.context.newPage();
+        try {
+          await openXPage(page, xComposeUrl(draftText));
+          await page.bringToFront();
+          existing.lastUse = Date.now();
+        } catch (error) {
+          await page.close().catch(() => undefined);
+          throw error;
+        }
+      } else {
+        await existing.context.pages()[0]?.bringToFront().catch(() => undefined);
+      }
       return { version: existing.version };
     }
     if (remote && remoteStarting.size + [...sessions.values()].filter((item) => item.remote).length >= REMOTE_BROWSER_LIMIT) {
@@ -312,9 +329,13 @@ export async function startBrowser(profile: BrowserSettings): Promise<{ version:
       });
       const version = context.browser()?.version();
       if (!version) throw new Error('无法读取实际浏览器版本。');
-      const sessionCookies = await context.cookies(X_HOME_URL);
       const page = context.pages()[0] ?? await context.newPage();
-      await openXPage(page, sessionCookies.some(({ name, value }) => name === 'auth_token' && value) ? X_HOME_URL : X_LOGIN_URL);
+      if (draftText) {
+        await openXPage(page, xComposeUrl(draftText));
+      } else {
+        const sessionCookies = await context.cookies(X_HOME_URL);
+        await openXPage(page, sessionCookies.some(({ name, value }) => name === 'auth_token' && value) ? X_HOME_URL : X_LOGIN_URL);
+      }
       if (!workspaceAuthorized(customerId)) throw new InputError('当前授权无法启动浏览器。', 403);
       const session: BrowserSession = { context, bridge, version, workspaceId: customerId, remote, lastUse: Date.now(), inputPending: false };
       sessions.set(key, session);

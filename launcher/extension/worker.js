@@ -25,7 +25,7 @@ function nativePort() {
 }
 
 chrome.runtime.onMessageExternal.addListener((request, sender, reply) => {
-  if (sender.origin !== origin || sender.frameId > 0 || request?.type !== 'open' ||
+  if (sender.origin !== origin || sender.frameId > 0 || (request?.type !== 'open' && request?.type !== 'open-composer') ||
       typeof request.ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(request.ticket)) return false;
 
   const id = crypto.randomUUID();
@@ -37,7 +37,7 @@ chrome.runtime.onMessageExternal.addListener((request, sender, reply) => {
   }
   pending.set(id, respond);
   try {
-    nativePort().postMessage({ id, type: 'open', ticket: request.ticket });
+    nativePort().postMessage({ id, type: request.type, ticket: request.ticket });
   } catch {
     respond({ success: false, message: '无法连接本机启动器，请检查安装后重试。' });
   }
