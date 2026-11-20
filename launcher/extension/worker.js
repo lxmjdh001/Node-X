@@ -25,7 +25,7 @@ function nativePort() {
 }
 
 chrome.runtime.onMessageExternal.addListener((request, sender, reply) => {
-  if (sender.origin !== origin || sender.frameId > 0 || (request?.type !== 'open' && request?.type !== 'open-composer') ||
+  if (sender.origin !== origin || sender.frameId > 0 || (request?.type !== 'open' && request?.type !== 'open-composer' && request?.type !== 'open-messages') ||
       typeof request.ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(request.ticket)) return false;
 
   const id = crypto.randomUUID();

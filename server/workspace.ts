@@ -342,9 +342,10 @@ workspace.delete('/profiles/:id', async (req, res) => {
 
 workspace.post('/profiles/:id/launcher-ticket', (req, res) => {
   const profile = profileById(req.params.id);
-  const { draftId } = openProfileInput.parse(req.body ?? {});
+  const { draftId, messages } = openProfileInput.extend({ messages: z.literal(true).optional() }).parse(req.body ?? {});
+  if (draftId && messages) throw new InputError('请选择发帖或私信入口。');
   if (draftId) draftTextForProfile(profile, draftId);
-  issueLauncherTicket(req, res, profile.id, draftId);
+  issueLauncherTicket(req, res, profile.id, draftId, messages);
 });
 
 workspace.post('/profiles/:id/start', async (req, res) => {

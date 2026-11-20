@@ -1,4 +1,4 @@
-type LaunchMode = 'open' | 'open-composer';
+type LaunchMode = 'open' | 'open-composer' | 'open-messages';
 type Reply = { success?: boolean; message?: string };
 type ChromeRuntime = {
   lastError?: { message?: string };
@@ -11,7 +11,7 @@ export async function launchOnMac(
   mode: LaunchMode = 'open',
 ): Promise<string> {
   const runtime = (window as Window & { chrome?: { runtime?: ChromeRuntime } }).chrome?.runtime;
-  const missing = mode === 'open-composer'
+  const missing = mode !== 'open'
     ? '请下载新版 Mac 启动器，运行安装脚本并重新加载 Chrome 扩展。'
     : '请用 Mac 上的 Google Chrome 打开工作台，并安装本机启动器扩展。';
   if (!runtime?.sendMessage) throw new Error(missing);
@@ -23,7 +23,7 @@ export async function launchOnMac(
         clearTimeout(timeout);
         if (runtime.lastError) {
           reject(new Error(missing));
-        } else if (mode === 'open-composer' && reply?.message === '无法识别启动请求。') {
+        } else if (mode !== 'open' && reply?.message === '无法识别启动请求。') {
           reject(new Error(missing));
         } else if (!reply?.success) {
           reject(new Error(reply?.message || '本机启动器未接收请求，请检查安装后重试。'));

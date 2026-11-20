@@ -12,6 +12,7 @@ import { xComposeUrl } from '../src/x-compose.js';
 const MAC_CHROME_APP = '/Applications/Google Chrome.app';
 export const MAC_CHROME = `${MAC_CHROME_APP}/Contents/MacOS/Google Chrome`;
 const X_URL = 'https://x.com/';
+const X_CHAT_URL = 'https://x.com/i/chat';
 const X_LOGIN_URL = 'https://x.com/i/flow/login';
 const run = promisify(execFile);
 
@@ -25,7 +26,7 @@ async function chromePid(directory: string): Promise<number | undefined> {
   }
 }
 
-export async function openMacChrome(directory: string, size: { width: number; height: number }, proxy: ProxySettings, draftText?: string) {
+export async function openMacChrome(directory: string, size: { width: number; height: number }, proxy: ProxySettings, draftText?: string, messages = false) {
   if (process.platform !== 'darwin') throw new Error('当前启动器适用于 macOS。');
   await access(MAC_CHROME, constants.X_OK).catch(() => { throw new Error('请先在此 Mac 安装 Google Chrome。'); });
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -54,7 +55,7 @@ export async function openMacChrome(directory: string, size: { width: number; he
       '--disable-quic', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1',
     ];
-    const target = draftText ? xComposeUrl(draftText) : hasProfile ? X_URL : X_LOGIN_URL;
+    const target = messages ? X_CHAT_URL : draftText ? xComposeUrl(draftText) : hasProfile ? X_URL : X_LOGIN_URL;
     const child = spawn('/usr/bin/open', ['-W', ...openArgs, target], { stdio: 'ignore', env });
     let stopped = false;
     const closed = new Promise<void>((done) => child.once('close', () => {
@@ -69,9 +70,9 @@ export async function openMacChrome(directory: string, size: { width: number; he
         if (pid && !stopped) {
           return {
             closed,
-            show: async (nextDraft?: string) => {
+            show: async (nextDraft?: string, nextMessages = false) => {
               if (stopped || pid !== await chromePid(directory)) throw new Error('Chrome 已关闭，请重试。');
-              await run('/usr/bin/open', [...openArgs, nextDraft ? xComposeUrl(nextDraft) : X_URL], { env, timeout: 4000 });
+              await run('/usr/bin/open', [...openArgs, nextMessages ? X_CHAT_URL : nextDraft ? xComposeUrl(nextDraft) : X_URL], { env, timeout: 4000 });
             },
             close: async () => {
               if (!stopped && pid === await chromePid(directory)) {

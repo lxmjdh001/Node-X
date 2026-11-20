@@ -495,6 +495,21 @@ function App({
       return false;
     }
   };
+  const openMessages = async (profile: Profile) => {
+    if (!clientLauncher) return;
+    setBusy(profile.id);
+    try {
+      const message = await launchOnMac(clientLauncher,
+        () => request(`/api/profiles/${profile.id}/launcher-ticket`, "POST", { messages: true }),
+        "open-messages");
+      setToast({ text: message });
+      void refresh();
+    } catch (error) {
+      setToast({ text: (error as Error).message, error: true });
+    } finally {
+      setBusy("");
+    }
+  };
   const openAssignedPages = async (drafts: ComposerDraft[]) => {
     setBusy("manual-publish");
     let opened = 0;
@@ -822,6 +837,11 @@ function App({
                       )}
                       {!preview && (
                         <>
+                          {profile && clientLauncher && (
+                            <Button icon={ExternalLink} disabled={!!busy} onClick={() => void openMessages(profile)}>
+                              打开 X 私信
+                            </Button>
+                          )}
                           {profile?.running && data.remoteBrowser && (
                             <IconButton
                               icon={Square}

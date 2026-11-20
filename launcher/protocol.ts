@@ -8,6 +8,7 @@ export const launcherWorkspace = z.union([z.literal('owner'), z.uuid()]);
 export const launchPayload = z.object({
   workspace: launcherWorkspace,
   profile: z.uuid(),
+  messages: z.literal(true).optional(),
   draftText: z.string().min(1).max(MAX_SOURCE_TEXT).optional(),
   presenceToken: z.string().min(1).max(512).optional(),
   width: z.number().int().min(320).max(3840),
