@@ -6,7 +6,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { browserFrame, browserVersion, checkProxy, chromiumInfo, macChromeLauncher, remoteBrowser, sendBrowserInput, startBrowser, stopBrowser } from './browser.js';
 import { managerPort } from './camoufox-client.js';
-import { contentStatus } from './content.js';
+import { contentStatus, xAuthorizationMatches } from './content.js';
+import { xAuthSettings } from './publishing-settings.js';
 import { InputError, requireFound } from './errors.js';
 import { clientLauncher, issueLauncherTicket, launcherDownload, launcherExtensionId } from './launcher.js';
 import { launcherPresence } from './launcher-presence.js';
@@ -148,8 +149,9 @@ function ensureProfileFree(id: string, allowRunning = false) {
 workspace.get('/workspace', async (_req, res) => {
   const customer = isCustomerWorkspace();
   const chromium = clientLauncher ? undefined : await chromiumInfo();
+  const clientId = xAuthSettings()?.clientId;
   const accounts = rows<Account>('SELECT * FROM accounts ORDER BY createdAt DESC').map(({ token, xUserId: _id, ...account }) => ({
-    ...account, xConnected: Boolean(token),
+    ...account, xConnected: xAuthorizationMatches(token, clientId),
   }));
   const proxies = rows<Proxy>('SELECT * FROM proxies ORDER BY rowid DESC').map(({ password, ...proxy }) => ({
     ...proxy, hasPassword: Boolean(password),

@@ -81,6 +81,8 @@ CAMOUFOX_API_KEY=
 | X 发文 | 在 [X Developer Console](https://console.x.com/) 创建启用 OAuth 2.0 和读写权限的应用，填写 `X_CLIENT_ID`。保密客户端同时填写 `X_CLIENT_SECRET` |
 | X 回调 | 控制台与本地的 `X_REDIRECT_URI` 须完全一致，默认 `http://127.0.0.1:4173/api/x/callback`。授权时请使用相同的本机地址打开工作台 |
 
+线上也可以在「登录码管理 → 发布流程管理」选择「官方 API」，填写同一套应用的 Client ID 和可选的 Client Secret。各 X 账号在窗口管理里分别完成授权。内容工作室支持选中草稿，预览目标账号和纯文字正文，确认后立即发布或定时入队。选择「大模型 MCP」会暂停官方 API 队列，切回官方 API 时继续。
+
 应用使用 OAuth 2.0 PKCE 和用户授权，申请 `tweet.read`、`tweet.write`、`users.read`、`offline.access`。账号表已填用户名时会核对实际授权账号。X API 调用按[官方规则计费](https://docs.x.com/x-api/getting-started/pricing)。
 
 ## 项目结构

@@ -12,8 +12,10 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Send,
 } from "lucide-react";
 import { ModelPage } from "./models-page";
+import { PublishingSettingsPanel } from "./publishing-settings";
 
 type OperatorState = {
   enrolled: boolean;
@@ -328,7 +330,7 @@ function RenewLicenseDialog({
 
 export default function OperatorApp() {
   const [state, setState] = useState<OperatorState | null>(null);
-  const [section, setSection] = useState<"codes" | "models">("codes");
+  const [section, setSection] = useState<"codes" | "models" | "publishing">("codes");
   const [key, setKey] = useState<BrowserKey | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<
@@ -406,6 +408,8 @@ export default function OperatorApp() {
   const sessionExpiresAt = state?.sessionExpiresAt ?? null;
   const authenticated = !!key && sessionExpiresAt !== null;
   const showModels = authenticated && section === "models";
+  const showPublishing = authenticated && section === "publishing";
+  const showCodes = authenticated && section === "codes";
 
   function endSession() {
     setState((current) => current && { ...current, sessionExpiresAt: null });
@@ -589,10 +593,11 @@ export default function OperatorApp() {
       <main className="operator-main">
         <div className="operator-heading">
           <span className="access-symbol">
-            {showModels ? <Sparkles size={26} strokeWidth={1.7} aria-hidden="true" /> : <KeyRound size={26} strokeWidth={1.7} aria-hidden="true" />}
+            {showPublishing ? <Send size={26} strokeWidth={1.7} aria-hidden="true" />
+              : showModels ? <Sparkles size={26} strokeWidth={1.7} aria-hidden="true" /> : <KeyRound size={26} strokeWidth={1.7} aria-hidden="true" />}
           </span>
           <div>
-            <h1>{showModels ? "全局模型管理" : authenticated ? "登录码管理" : "登录管理后台"}</h1>
+            <h1>{showPublishing ? "发布流程管理" : showModels ? "全局模型管理" : authenticated ? "登录码管理" : "登录管理后台"}</h1>
           </div>
           {authenticated ? (
             <OperatorButton
@@ -618,13 +623,17 @@ export default function OperatorApp() {
         </div>
         {authenticated && (
           <nav className="operator-sections" aria-label="后台功能">
-            <OperatorButton className={showModels ? "secondary" : "primary"} aria-pressed={!showModels}
+            <OperatorButton className={showCodes ? "primary" : "secondary"} aria-pressed={showCodes}
               onClick={() => setSection("codes")}>登录码管理</OperatorButton>
             <OperatorButton className={showModels ? "primary" : "secondary"} aria-pressed={showModels}
               onClick={() => setSection("models")}>全局模型管理</OperatorButton>
+            <OperatorButton className={showPublishing ? "primary" : "secondary"} aria-pressed={showPublishing}
+              onClick={() => setSection("publishing")}>发布流程管理</OperatorButton>
           </nav>
         )}
-        {showModels ? (
+        {showPublishing ? (
+          <PublishingSettingsPanel request={manage} />
+        ) : showModels ? (
           <ModelPage global requestModel={(path, method, body) => manage(path.slice(1), body, method)} />
         ) : (
         <div className="operator-grid">
@@ -941,7 +950,7 @@ export default function OperatorApp() {
           </section>
         </div>
         )}
-        {authenticated && !showModels && code && (
+        {showCodes && code && (
           <section
             className={`operator-code-card panel ${codeStatus === "expired" ? "expired" : ""}`}
             tabIndex={-1}
@@ -993,7 +1002,7 @@ export default function OperatorApp() {
             </p>
           </section>
         )}
-        {authenticated && !showModels && (
+        {showCodes && (
           <section
             className="operator-code-card operator-license-list panel"
             aria-labelledby="license-list-title"
@@ -1147,7 +1156,7 @@ export default function OperatorApp() {
             )}
           </section>
         )}
-        {authenticated && !showModels && renewal && (
+        {showCodes && renewal && (
           <RenewLicenseDialog
             license={renewal.entry}
             busy={pending === "renew"}

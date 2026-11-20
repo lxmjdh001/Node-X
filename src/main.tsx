@@ -58,6 +58,7 @@ import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
 import { assignmentModes, MAX_BULK_DELETE_IDS, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, postOutputLanguages, type AssignmentMode, type PendingPost, type PostLayout, type PostOutputLanguage } from "./post-queue";
 import { ModelPage } from "./models-page";
+import { MAX_BULK_PUBLISH, publishSnapshot, type PublishingMethod } from "./publishing";
 import { Icon, Button, IconButton, Dialog, Field } from "./ui";
 import "./styles.css";
 
@@ -111,12 +112,13 @@ type Draft = {
   error: string | null;
   createdAt: string;
 };
+type PublishItem = { draft: Draft; account?: Account };
 type Workspace = {
   accounts: Account[];
   proxies: Proxy[];
   profiles: Profile[];
   drafts: Draft[];
-  settings: { aiConfigured: boolean; publishAiConfigured: boolean; xConfigured: boolean };
+  settings: { aiConfigured: boolean; publishAiConfigured: boolean; xConfigured: boolean; publishingMethod?: PublishingMethod };
   chromium?: { installed: boolean; version: string | null };
   workspaceScope?: "owner" | "customer";
   remoteBrowser?: boolean;
@@ -306,6 +308,7 @@ function App({
   const [camoufoxError, setCamoufoxError] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [publishing, setPublishing] = useState<Draft | null>(null);
+  const [bulkPublishing, setBulkPublishing] = useState<PublishItem[] | null>(null);
   const [reviewing, setReviewing] = useState<Draft | null>(null);
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
@@ -538,6 +541,11 @@ function App({
   const selectableDrafts = visibleDrafts.filter(draft => draft.status !== "publishing");
   const checkedDraftIds = new Set(selectedDraftIds);
   const checkedDrafts = selectableDrafts.filter(draft => checkedDraftIds.has(draft.id));
+  const checkedPublishable = checkedDrafts.every(draft => draft.status === "draft" || draft.status === "error");
+  const bulkPublishHint = !data.settings.xConfigured
+    ? data.settings.publishingMethod === "mcp" ? "大模型 MCP 待接入。" : "管理员启用 X 官方 API 后可批量发布。"
+    : !checkedPublishable ? "请选择草稿或发布失败的内容。"
+    : checkedDrafts.length > MAX_BULK_PUBLISH ? `每次最多发布 ${MAX_BULK_PUBLISH} 条。` : "";
 
   function changeDraftFilter(next: string) {
     if (next === draftFilter) return;
@@ -1649,7 +1657,20 @@ function App({
                             "drafts", checkedDrafts.map(draft => draft.id),
                             checkedDrafts.some(draft => draft.status === "scheduled"),
                           )}
-                        />
+                        >
+                          {(draftFilter === "draft" || draftFilter === "all") && (
+                            <>
+                              {checkedDrafts.length > 0 && bulkPublishHint && <small className="subtle">{bulkPublishHint}</small>}
+                              <Button variant="primary" icon={Send}
+                                disabled={!!busy || !checkedDrafts.length || !!bulkPublishHint}
+                                onClick={() => setBulkPublishing(checkedDrafts.map(draft => ({
+                                  draft, account: data.accounts.find(account => account.id === draft.accountId),
+                                })))}>
+                                批量发布
+                              </Button>
+                            </>
+                          )}
+                        </ContentSelectionToolbar>
                         <div className="draft-list">
                           {visibleDrafts.map((draft, index) => (
                             <article className="draft-card" key={draft.id}>
@@ -2068,10 +2089,30 @@ function App({
           }}
         />
       )}
+      {bulkPublishing && (
+        <PublishDialog
+          items={bulkPublishing}
+          bulk
+          onClose={() => setBulkPublishing(null)}
+          onSubmit={async (scheduledAt) => {
+            const payload = publishSnapshot(bulkPublishing.map(({ draft, account }) => ({
+              id: draft.id, accountId: draft.accountId, text: draft.text,
+              handle: account?.xUsername || account?.username || "",
+            })));
+            const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+            const snapshot = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+            await mutate("bulk-publish", "/api/drafts/bulk-publish", "POST", {
+              ids: bulkPublishing.map(({ draft }) => draft.id), snapshot, scheduledAt, confirmed: true,
+            }, `已将 ${bulkPublishing.length} 条内容加入发布队列。`);
+            setBulkPublishing(null);
+            setSelectedDraftIds([]);
+            changeDraftFilter(scheduledAt ? "scheduled" : "all");
+          }}
+        />
+      )}
       {publishing && (
         <PublishDialog
-          draft={publishing}
-          account={data.accounts.find((a) => a.id === publishing.accountId)}
+          items={[{ draft: publishing, account: data.accounts.find(a => a.id === publishing.accountId) }]}
           onClose={() => setPublishing(null)}
           onSubmit={async (scheduledAt) => {
             await mutate(
@@ -4547,13 +4588,13 @@ function EntityForm({
 }
 
 function PublishDialog({
-  draft,
-  account,
+  items,
+  bulk = false,
   onClose,
   onSubmit,
 }: {
-  draft: Draft;
-  account?: Account;
+  items: PublishItem[];
+  bulk?: boolean;
   onClose: () => void;
   onSubmit: (scheduledAt?: string) => Promise<void>;
 }) {
@@ -4562,17 +4603,19 @@ function PublishDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const ready = items.every(({ account }) => account?.xConnected);
   return (
     <Dialog
-      title="确认发布内容"
-      description="请核对目标账号与正文，确认后将通过 X 接口发布。"
+      title={bulk ? "确认批量发布" : "确认发布内容"}
+      description={bulk ? `核对 ${items.length} 条正文和发布账号。确认后将通过 X 官方 API 逐条发送。` : "请核对目标账号与正文，确认后将通过 X 接口发布。"}
       onClose={() => !pending && onClose()}
       className="dialog-wide"
     >
       <form
         onSubmit={async (e) => {
           e.preventDefault();
-          if (mode === "later" && new Date(time).getTime() <= Date.now()) {
+          if (pending || !confirmed || !ready) return;
+          if (mode === "later" && (!time || new Date(time).getTime() <= Date.now())) {
             setError("请选择未来的发布时间。");
             return;
           }
@@ -4590,21 +4633,23 @@ function PublishDialog({
         }}
       >
         <div className="dialog-body">
-          <div className="publish-account">
-            <span className="avatar">{account?.label.slice(0, 1)}</span>
-            <div>
-              <strong>{account?.label}</strong>
-              <span>
-                @
-                {(account?.xUsername || account?.username || "").replace(
-                  /^@/,
-                  "",
-                )}
-              </span>
-            </div>
-            <Badge tone="green">已授权 X</Badge>
+          <div className={bulk ? "bulk-publish-previews" : undefined}>
+            {items.map(({ draft, account }, index) => (
+              <div className={bulk ? "bulk-publish-preview" : undefined} key={draft.id}>
+                <div className="publish-account">
+                  <span className="avatar">{account?.label.slice(0, 1)}</span>
+                  <div>
+                    <strong>{bulk && `${index + 1}. `}{account?.label || "未关联账号"}</strong>
+                    {(account?.xUsername || account?.username) && <span>@{account.xUsername || account.username}</span>}
+                  </div>
+                  {account?.xConnected ? <Badge tone="green">已授权 X</Badge>
+                    : account ? <a className="button secondary" href={`/api/x/connect/${account.id}`}>连接 X</a>
+                    : <Badge tone="neutral">待授权</Badge>}
+                </div>
+                <div className="publish-preview">{draft.text || "正文为空"}</div>
+              </div>
+            ))}
           </div>
-          <div className="publish-preview">{draft.text}</div>
           <div className="publish-mode">
             <label>
               <input
@@ -4628,7 +4673,7 @@ function PublishDialog({
           {mode === "later" && (
             <Field
               label="发布时间"
-              hint="使用当前设备时区。排程期间需要保持本地服务运行。"
+              hint="使用当前设备时区。到时由 Node X 服务发送。"
             >
               <input
                 type="datetime-local"
@@ -4647,7 +4692,7 @@ function PublishDialog({
             />
             <span>
               我已核对目标账号和正文，确认{mode === "later" ? "按计划" : "立即"}
-              发布这篇内容。
+              发布{bulk ? `这 ${items.length} 条内容` : "这篇内容"}。
             </span>
           </label>
           {error && (
@@ -4664,7 +4709,7 @@ function PublishDialog({
             type="submit"
             variant="primary"
             icon={mode === "later" ? Clock3 : Send}
-            disabled={!confirmed}
+            disabled={!confirmed || !ready}
             busy={pending}
           >
             {mode === "later" ? "确认排程" : "确认发布"}

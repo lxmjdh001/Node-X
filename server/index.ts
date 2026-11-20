@@ -13,6 +13,7 @@ import { editor } from './editor.js';
 import { InputError } from './errors.js';
 import { imports } from './imports.js';
 import { modelRoutes } from './model-routes.js';
+import { publishingOperator } from './publishing-settings.js';
 import { postQueue } from './post-queue.js';
 import { clientLauncher, redeemLauncherTicket } from './launcher.js';
 import { reapLauncherPresence, reportLauncherPresence } from './launcher-presence.js';
@@ -141,7 +142,7 @@ operatorApp.use((req, res, next) => {
 });
 operatorApp.use('/operator/api', sameOrigin((host) => host === operatorExternal?.host ? operatorExternal.origin : `http://${host}`), express.json({ limit: '8kb' }));
 operatorApp.use(operatorAuth);
-operatorApp.use('/operator/api', modelRoutes('global'));
+operatorApp.use('/operator/api', modelRoutes('global'), publishingOperator);
 operatorApp.use('/operator/api', (_req, res) => { res.status(404).json({ error: '找不到这个接口。' }); });
 operatorApp.use('/api', (_req, res) => { res.sendStatus(404); });
 

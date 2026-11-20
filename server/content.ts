@@ -1,10 +1,13 @@
 import twitterText from 'twitter-text';
 import { ApiResponseError, TwitterApi, type AccessOAuth2TokenResult, type TweetV2PostTweetResult } from 'twitter-api-v2';
 import { modelAvailable, requiredModel, runModel } from './models.js';
+import { publishingStatus, xAuthSettings, type XAuthSettings } from './publishing-settings.js';
+import { reveal } from './store.js';
 
 export type XToken = {
   accessToken: string;
   refreshToken: string;
+  clientId?: string;
   /** Unix timestamp in milliseconds. */
   expiresAt: number;
 };
@@ -25,44 +28,39 @@ export class ContentError extends Error {
   }
 }
 
-const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:4173/api/x/callback';
 const X_SCOPES = ['tweet.read', 'tweet.write', 'users.read', 'offline.access'];
 const refreshing = new Map<string, Promise<XToken>>();
 
-function env(name: string): string {
-  return process.env[name]?.trim() ?? '';
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
-  } catch {
-    return false;
-  }
-}
-
-function xConfigured() {
-  return env('NODEX_X_PUBLISH_MODE') !== 'browser' &&
-    Boolean(env('X_CLIENT_ID') && isHttpUrl(env('X_REDIRECT_URI') || DEFAULT_REDIRECT_URI));
-}
-
-export function contentStatus(): { aiConfigured: boolean; publishAiConfigured: boolean; xConfigured: boolean } {
+export function contentStatus() {
   return {
     aiConfigured: modelAvailable('writing'),
     publishAiConfigured: modelAvailable('publishing'),
-    xConfigured: xConfigured(),
+    ...publishingStatus(),
   };
 }
 
-function xClient(): TwitterApi {
-  if (!xConfigured()) {
-    throw new ContentError('X_NOT_CONFIGURED', '请先配置 X_CLIENT_ID 和有效的 X_REDIRECT_URI。', 503);
-  }
+function requireXAuth(): XAuthSettings {
+  const config = xAuthSettings();
+  if (!config) throw new ContentError('X_NOT_CONFIGURED', '请先在管理后台启用并配置 X 官方 API。', 409);
+  return config;
+}
+
+function xClient(config: XAuthSettings): TwitterApi {
   return new TwitterApi({
-    clientId: env('X_CLIENT_ID'),
-    ...(env('X_CLIENT_SECRET') ? { clientSecret: env('X_CLIENT_SECRET') } : {}),
+    clientId: config.clientId,
+    ...(config.clientSecret ? { clientSecret: config.clientSecret } : {}),
   });
+}
+
+export function xAuthorizationMatches(encrypted: string | null, clientId: string | undefined) {
+  if (!encrypted) return false;
+  try {
+    const token = JSON.parse(reveal(encrypted)) as XToken;
+    return Boolean(token?.accessToken && Number.isFinite(token.expiresAt) &&
+      (!clientId || !token.clientId || token.clientId === clientId));
+  } catch {
+    return false;
+  }
 }
 
 export function validatePostText(value: string, generated = false): string {
@@ -95,34 +93,36 @@ export async function generateDraft(prompt: string, account: string): Promise<st
 }
 
 /** The caller stores state and codeVerifier server-side and validates callback state. */
-export function beginXAuthorization(): { url: string; codeVerifier: string; state: string } {
-  const { url, codeVerifier, state } = xClient().generateOAuth2AuthLink(
-    env('X_REDIRECT_URI') || DEFAULT_REDIRECT_URI,
+export function beginXAuthorization() {
+  const config = requireXAuth();
+  const { url, codeVerifier, state } = xClient(config).generateOAuth2AuthLink(
+    config.redirectUri,
     { scope: X_SCOPES },
   );
-  return { url, codeVerifier, state };
+  return { url, codeVerifier, state, clientId: config.clientId };
 }
 
-async function exchangeXToken(fields: Record<string, string>, previousRefreshToken = ''): Promise<XToken> {
-  const result = await xClient().post<AccessOAuth2TokenResult>('https://api.x.com/2/oauth2/token', {
+async function exchangeXToken(config: XAuthSettings, fields: Record<string, string>, previousRefreshToken = ''): Promise<XToken> {
+  const result = await xClient(config).post<AccessOAuth2TokenResult>('https://api.x.com/2/oauth2/token', {
     ...fields,
-    ...(env('X_CLIENT_SECRET') ? {} : { client_id: env('X_CLIENT_ID') }),
+    ...(config.clientSecret ? {} : { client_id: config.clientId }),
   }, { forceBodyMode: 'url', timeout: 15_000 });
   const refreshToken = result.refresh_token || previousRefreshToken;
   if (!result.access_token || !refreshToken || !Number.isFinite(result.expires_in) || result.expires_in <= 0) {
     throw new ContentError('X_MISSING_REFRESH_TOKEN', 'X 未返回完整的离线授权，请重新授权并允许 offline.access。', 502);
   }
-  return { accessToken: result.access_token, refreshToken, expiresAt: Date.now() + result.expires_in * 1000 };
+  return { accessToken: result.access_token, refreshToken, clientId: config.clientId, expiresAt: Date.now() + result.expires_in * 1000 };
 }
 
-export async function finishXAuthorization(code: string, codeVerifier: string): Promise<{ userId: string; username: string; token: XToken }> {
+export async function finishXAuthorization(code: string, codeVerifier: string, clientId: string): Promise<{ userId: string; username: string; token: XToken }> {
   if (!code || !codeVerifier) {
     throw new ContentError('X_INVALID_CALLBACK', '授权回调不完整，请重新连接 X 账号。');
   }
   try {
-    const token = await exchangeXToken({
-      grant_type: 'authorization_code', code, code_verifier: codeVerifier,
-      redirect_uri: env('X_REDIRECT_URI') || DEFAULT_REDIRECT_URI,
+    const config = requireXAuth();
+    if (config.clientId !== clientId) throw new ContentError('X_APP_CHANGED', '应用配置已变更，请重新连接 X。', 409);
+    const token = await exchangeXToken(config, {
+      grant_type: 'authorization_code', code, code_verifier: codeVerifier, redirect_uri: config.redirectUri,
     });
     const { data: user } = await new TwitterApi(token.accessToken).v2.me();
     if (!user?.id || !user.username) {
@@ -139,7 +139,7 @@ export async function finishXAuthorization(code: string, codeVerifier: string): 
   }
 }
 
-async function refreshedToken(token: XToken): Promise<XToken> {
+async function refreshedToken(config: XAuthSettings, token: XToken): Promise<XToken> {
   if (!token.refreshToken) {
     throw new ContentError('X_RECONNECT_REQUIRED', '账号缺少离线授权，请重新连接 X。', 409);
   }
@@ -147,7 +147,7 @@ async function refreshedToken(token: XToken): Promise<XToken> {
   if (!pending) {
     pending = (async () => {
       try {
-        return await exchangeXToken({ grant_type: 'refresh_token', refresh_token: token.refreshToken }, token.refreshToken);
+        return await exchangeXToken(config, { grant_type: 'refresh_token', refresh_token: token.refreshToken }, token.refreshToken);
       } catch {
         throw new ContentError('X_REFRESH_FAILED', 'X 授权续期失败，尚未发送帖文，请重新连接账号后重试。', 409);
       }
@@ -193,19 +193,23 @@ export async function publishX(
   updateToken: (token: XToken) => void,
   assertAuthorized: () => void,
 ): Promise<{ postId: string }> {
+  const config = requireXAuth();
   const body = validatePostText(text);
-  if (!token?.accessToken || !Number.isFinite(token.expiresAt)) {
+  if (!token?.accessToken || !Number.isFinite(token.expiresAt) || (token.clientId && token.clientId !== config.clientId)) {
     throw new ContentError('X_RECONNECT_REQUIRED', '请先通过官方授权连接 X 账号。', 409);
   }
   let activeToken = token;
   if (token.expiresAt <= Date.now() + 60_000) {
-    activeToken = await refreshedToken(token);
+    activeToken = await refreshedToken(config, token);
     try {
       // Persist a rotating refresh token before allowing any publication.
       updateToken(activeToken);
     } catch {
       throw new ContentError('X_TOKEN_SAVE_FAILED', '续期授权未能保存，尚未发送帖文，请重新连接账号。', 500);
     }
+  }
+  if (xAuthSettings()?.clientId !== config.clientId) {
+    throw new ContentError('X_APP_CHANGED', '发布接口或应用配置已变更，请核对后重试。', 409);
   }
   assertAuthorized();
   try {

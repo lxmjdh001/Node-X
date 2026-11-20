@@ -1,5 +1,6 @@
-import { ContentError, contentStatus, publishX, type XToken } from './content.js';
+import { ContentError, publishX, type XToken } from './content.js';
 import { workspaceAuthorized } from './auth.js';
+import { publishingStatus } from './publishing-settings.js';
 import { customerWorkspaceIds, row, runInWorkspace, write, reveal, seal } from './store.js';
 
 export const publishable = "status IN ('draft', 'error')";
@@ -28,7 +29,7 @@ function nextDraft(): PendingDraft | undefined {
     SELECT drafts.id, drafts.text, drafts.accountId, accounts.token
     FROM drafts JOIN accounts ON accounts.id = drafts.accountId
     WHERE drafts.status = 'scheduled' AND scheduledAt <= ?
-    ORDER BY scheduledAt LIMIT 1
+    ORDER BY scheduledAt, drafts.rowid LIMIT 1
   `, new Date().toISOString());
 }
 
@@ -67,7 +68,7 @@ export function scheduleWorkspace(workspace: string | undefined) {
 }
 
 export function runPublishQueue() {
-  const configured = contentStatus().xConfigured;
+  const configured = publishingStatus().xConfigured;
   for (const workspace of [...workspaces]) {
     if (active.has(workspace)) continue;
     try {

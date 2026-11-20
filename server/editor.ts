@@ -1,17 +1,20 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
+import twitterText from 'twitter-text';
+import { MAX_BULK_PUBLISH, publishSnapshot } from '../src/publishing.js';
 import { MAX_BULK_DELETE_IDS } from '../src/post-queue.js';
-import { beginXAuthorization, ContentError, contentStatus, finishXAuthorization, generateDraft, validatePostText } from './content.js';
+import { beginXAuthorization, ContentError, contentStatus, finishXAuthorization, generateDraft, validatePostText, xAuthorizationMatches } from './content.js';
 import { InputError, requireFound } from './errors.js';
 import { publishable, scheduleWorkspace } from './publisher.js';
-import { row, seal, workspaceId, write } from './store.js';
+import { row, seal, workspaceDb, workspaceId, write } from './store.js';
 import { sessionHasAccess, workspaceAuthorized } from './auth.js';
 import { requiredModel, runModel } from './models.js';
+import { xAuthSettings } from './publishing-settings.js';
 import { accountById } from './workspace.js';
 
 export const editor = Router();
-const pending = new Map<string, { workspace: string | undefined; accountId: string; verifier: string; nonce: string; expires: number }>();
+const pending = new Map<string, { workspace: string | undefined; accountId: string; verifier: string; clientId: string; nonce: string; expires: number }>();
 const oauthCookie = 'nodex_oauth';
 const cookieOptions = { httpOnly: true, sameSite: 'lax' as const, path: '/api/x' };
 const ok = { ok: true };
@@ -42,13 +45,13 @@ function assertAccountIdle(accountId: string) {
 editor.get('/x/connect/:accountId', (req, res) => {
   const account = accountById(req.params.accountId);
   assertAccountIdle(account.id);
-  if (!contentStatus().xConfigured) throw new InputError('请先在 .env 配置 X OAuth。', 409);
-  const { url, codeVerifier, state } = beginXAuthorization();
+  if (!contentStatus().xConfigured) throw new InputError('请先在管理后台启用并配置 X 官方 API。', 409);
+  const { url, codeVerifier, state, clientId } = beginXAuthorization();
   const nonce = randomBytes(24).toString('base64url');
   const maxAge = 10 * 60 * 1000;
   for (const [key, item] of pending) if (item.expires <= Date.now()) pending.delete(key);
   if (pending.size >= 100) throw new InputError('授权请求过多，请稍后再试。', 429);
-  pending.set(state, { workspace: workspaceId(), accountId: account.id, verifier: codeVerifier, nonce, expires: Date.now() + maxAge });
+  pending.set(state, { workspace: workspaceId(), accountId: account.id, verifier: codeVerifier, clientId, nonce, expires: Date.now() + maxAge });
   res.cookie(oauthCookie, nonce, { ...cookieOptions, secure: req.secure, maxAge }).redirect(url);
 });
 
@@ -65,7 +68,8 @@ editor.get('/x/callback', async (req, res) => {
   res.clearCookie(oauthCookie, { ...cookieOptions, secure: req.secure });
   try {
     if (!code) throw new Error('Authorization declined.');
-    const result = await finishXAuthorization(code, entry.verifier);
+    const result = await finishXAuthorization(code, entry.verifier, entry.clientId);
+    if (xAuthSettings()?.clientId !== entry.clientId) throw new Error('X configuration changed');
     if (!workspaceAuthorized(entry.workspace)) throw new Error('Workspace no longer authorized.');
     const account = accountById(entry.accountId);
     assertAccountIdle(account.id);
@@ -148,19 +152,84 @@ editor.post('/drafts/:id/review', async (req, res) => {
   res.json({ model: `${model.name} · ${model.model}`, advice: advice.slice(0, 1800), lengthIssue });
 });
 
-editor.post('/drafts/:id/publish', (req, res) => {
-  const draft = draftById(req.params.id);
-  const { scheduledAt } = scheduleInput.parse(req.body ?? {});
-  const text = validatePostText(draft.text);
-  if (!contentStatus().xConfigured || !accountById(draft.accountId).token) throw new InputError('请先为这个账号连接 X。', 409);
+function publicationTime(scheduledAt?: string) {
   const time = scheduledAt ? new Date(scheduledAt) : new Date();
   if (!Number.isFinite(time.getTime()) || (scheduledAt && time.getTime() < Date.now() - 5000)) {
     throw new InputError('请选择有效的未来发布时间。');
   }
+  return time.toISOString();
+}
+
+function enqueueDraft(draftId: string, text: string, time: string) {
   if (!write(`UPDATE drafts SET text = ?, status = 'scheduled', scheduledAt = ?, error = NULL
-    WHERE id = ? AND ${publishable}`, text, time.toISOString(), draft.id)) {
-    throw new InputError('这条记录无法再次发布。', 409);
+    WHERE id = ? AND ${publishable}`, text, time, draftId)) {
+    throw new InputError('选中的内容已进入队列或无法再次发布，请刷新列表。', 409);
   }
+}
+
+const bulkPublishInput = scheduleInput.extend({
+  ids: z.array(z.uuid()).min(1).max(MAX_BULK_PUBLISH)
+    .refine(ids => new Set(ids).size === ids.length, '选中的内容存在重复。'),
+  snapshot: z.string().regex(/^[a-f0-9]{64}$/),
+  confirmed: z.literal(true),
+});
+
+editor.post('/drafts/bulk-publish', (req, res) => {
+  const input = bulkPublishInput.parse(req.body);
+  const config = xAuthSettings();
+  if (!config) throw new InputError('请先在管理后台启用并配置 X 官方 API。', 409);
+  const time = publicationTime(input.scheduledAt);
+  const database = workspaceDb();
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const drafts = input.ids.map((id, index) => {
+      const draft = draftById(id);
+      if (draft.status !== 'draft' && draft.status !== 'error') {
+        throw new InputError(`第 ${index + 1} 条内容已进入队列或无法再次发布，请刷新列表。`, 409);
+      }
+      const account = accountById(draft.accountId);
+      if (!xAuthorizationMatches(account.token, config.clientId)) {
+        throw new InputError(`第 ${index + 1} 条的 X 账号需要重新连接或完成授权。`, 409);
+      }
+      return { ...draft, handle: account.xUsername || account.username };
+    });
+    if (createHash('sha256').update(publishSnapshot(drafts)).digest('hex') !== input.snapshot) {
+      throw new InputError('正文或目标账号已变更，请重新预览再确认。', 409);
+    }
+    const seen = new Set<string>();
+    for (const [index, draft] of drafts.entries()) {
+      try {
+        const text = validatePostText(draft.text);
+        if (twitterText.extractUrls(text).length) throw new InputError('批量发布支持纯文字，请先移除正文链接。');
+        const canonical = text.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+        if (seen.has(canonical)) throw new InputError('这批内容里有相同正文，请分别安排不同的帖子。');
+        seen.add(canonical);
+        enqueueDraft(draft.id, text, time);
+      } catch (error) {
+        if (error instanceof ContentError || error instanceof InputError) {
+          throw new InputError(`第 ${index + 1} 条：${error.message}`, error instanceof InputError ? error.status : error.statusCode);
+        }
+        throw error;
+      }
+    }
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+  scheduleWorkspace(workspaceId());
+  res.status(202).json({ count: input.ids.length });
+});
+
+editor.post('/drafts/:id/publish', (req, res) => {
+  const draft = draftById(req.params.id);
+  const { scheduledAt } = scheduleInput.parse(req.body ?? {});
+  const text = validatePostText(draft.text);
+  const config = xAuthSettings();
+  if (!config || !xAuthorizationMatches(accountById(draft.accountId).token, config.clientId)) {
+    throw new InputError('请先为这个账号连接 X。', 409);
+  }
+  enqueueDraft(draft.id, text, publicationTime(scheduledAt));
   scheduleWorkspace(workspaceId());
   res.status(202).json(ok);
 });

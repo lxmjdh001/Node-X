@@ -4078,3 +4078,33 @@ td strong {
 .model-description {
   margin: 0;
 }
+
+
+.publishing-settings-form {
+  max-width: 680px;
+}
+
+.publishing-settings-form > .checkbox-field {
+  margin-bottom: 16px;
+}
+
+.publishing-callback {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.publishing-callback .button {
+  margin-top: 23px;
+}
+
+.bulk-publish-previews {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.bulk-publish-preview .publish-preview {
+  margin-bottom: 0;
+}
