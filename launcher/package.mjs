@@ -20,7 +20,7 @@ try {
   await writeFile(join(extension, 'manifest.json'), JSON.stringify({
     manifest_version: 3,
     name: 'Node X 本机启动器' + (preview ? '（预览）' : ''),
-    version: '0.1.0',
+    version: config.version,
     key: config.extensionKey,
     minimum_chrome_version: '105',
     permissions: ['nativeMessaging'],

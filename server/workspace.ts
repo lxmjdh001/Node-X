@@ -8,7 +8,7 @@ import { browserFrame, browserVersion, checkProxy, chromiumInfo, macChromeLaunch
 import { managerPort } from './camoufox-client.js';
 import { contentStatus } from './content.js';
 import { InputError, requireFound } from './errors.js';
-import { clientLauncher, issueLauncherTicket, launcherExtensionId } from './launcher.js';
+import { clientLauncher, issueLauncherTicket, launcherDownload, launcherExtensionId } from './launcher.js';
 import { publicProxy } from './public-proxy.js';
 import { isCustomerWorkspace, workspaceDb, workspaceDirectory, workspaceId, reveal, row, rows, seal, write } from './store.js';
 
@@ -155,10 +155,7 @@ workspace.get('/workspace', async (_req, res) => {
     accounts, proxies, profiles, drafts: rows('SELECT * FROM drafts ORDER BY createdAt DESC'),
     settings: contentStatus(),
     workspaceScope: customer ? 'customer' : 'owner', chromium, remoteBrowser: !clientLauncher && remoteBrowser(), macChromeLauncher,
-    ...(clientLauncher ? {
-      launcherExtensionId,
-      launcherDownload: process.env.NODEX_PUBLIC_ORIGIN ? '/node-x-mac.zip' : '/node-x-mac-preview.zip',
-    } : {}),
+    ...(clientLauncher ? { launcherExtensionId, launcherDownload } : {}),
     camoufoxConfigured: managerPort() !== null, version: '0.1.0',
   });
 });

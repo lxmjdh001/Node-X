@@ -2,6 +2,7 @@ import { lookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { InputError } from './errors.js';
+import { googleAccountHosts } from './google-account-hosts.js';
 import type { ProxySettings } from './browser-proxy.js';
 
 const blocked = new BlockList();
@@ -47,11 +48,10 @@ export async function publicProxy(proxy: ProxySettings): Promise<ProxySettings> 
 }
 
 const X_HOSTS = ['x.com', 'twitter.com', 'twimg.com', 't.co', 'arkoselabs.com', 'funcaptcha.com',
-  'accounts.google.com', 'gstatic.com', 'appleid.apple.com', 'cdn-apple.com'];
-const GOOGLE_JAPAN_SIGN_IN = 'accounts.google.co.jp';
+  'gstatic.com', 'appleid.apple.com', 'cdn-apple.com'];
 
 export function allowedBrowserTarget(host: string, port: number): boolean {
   host = host.toLowerCase().replace(/\.$/, '');
   return (port === 443 || port === 80) &&
-    (host === GOOGLE_JAPAN_SIGN_IN || X_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`)));
+    (googleAccountHosts.has(host) || X_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`)));
 }

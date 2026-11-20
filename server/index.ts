@@ -1,7 +1,7 @@
 import './env.js';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import { ZodError } from 'zod';
 import { launcherConfig } from '../launcher/protocol.js';
@@ -172,7 +172,13 @@ if (dev) {
   const dist = resolve('dist');
   const index = resolve(dist, 'index.html');
   if (!existsSync(index)) throw new Error('请先运行 npm run build。');
-  app.use(express.static(dist));
+  app.use(express.static(dist, {
+    setHeaders(res, file) {
+      if (['node-x-mac.zip', 'node-x-mac-preview.zip'].includes(basename(file))) {
+        res.setHeader('Cache-Control', 'no-store');
+      }
+    },
+  }));
   app.get('/', (_req, res) => res.sendFile(index));
   operatorApp.use('/assets', express.static(resolve(dist, 'assets')));
   operatorApp.get('/operator', (_req, res) => res.sendFile(index));

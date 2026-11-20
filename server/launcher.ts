@@ -14,6 +14,8 @@ type Ticket = {
 
 export const clientLauncher = process.env.NODEX_CLIENT_LAUNCHER === '1';
 export const launcherExtensionId = launcherConfig.extensionId;
+const installer = process.env.NODEX_PUBLIC_ORIGIN ? '/node-x-mac.zip' : '/node-x-mac-preview.zip';
+export const launcherDownload = `${installer}?v=${launcherConfig.version}`;
 
 const tickets = new Map<string, Ticket>();
 const ticketMs = 60_000;
