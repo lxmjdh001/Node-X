@@ -1,6 +1,14 @@
 export const MAX_VARIANTS = 50;
 export const MAX_SOURCE_TEXT = 8000;
 export const MAX_POST_LINK = 2048;
+export const MAX_FORMAT_REQUIREMENTS = 500;
+
+export const postLayouts = {
+  automatic: '自动排版',
+  sentenceLines: '每句换行',
+} as const;
+
+export type PostLayout = keyof typeof postLayouts;
 
 export const assignmentModes = {
   oneAccount: '一个账号发一条或多条',

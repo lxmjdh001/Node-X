@@ -56,7 +56,7 @@ import {
 } from "./browser-region";
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
-import { assignmentModes, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, type AssignmentMode, type PendingPost } from "./post-queue";
+import { assignmentModes, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, type AssignmentMode, type PendingPost, type PostLayout } from "./post-queue";
 import { ModelPage } from "./models-page";
 import { Icon, Button, IconButton, Dialog, Field } from "./ui";
 import "./styles.css";
@@ -3752,6 +3752,8 @@ function PostImportDialog({
   const [url, setUrl] = useState("");
   const [text, setText] = useState("");
   const [count, setCount] = useState("3");
+  const [layout, setLayout] = useState<PostLayout>("automatic");
+  const [formatRequirements, setFormatRequirements] = useState("");
   const [busy, setBusy] = useState<"source" | "generate" | "refresh" | "">("");
   const [error, setError] = useState("");
   const number = Number(count);
@@ -3783,6 +3785,8 @@ function PostImportDialog({
     try {
       const { count: created } = await request("/api/pending-posts", "POST", {
         id, text: text || undefined, url: url.trim() || undefined, count: number,
+        layout: number > 0 ? layout : undefined,
+        formatRequirements: aiConfigured && number > 0 ? formatRequirements.trim() || undefined : undefined,
       }) as { count: number };
       setBusy("refresh");
       await onCreated(created);
@@ -3815,10 +3819,26 @@ function PostImportDialog({
             <textarea rows={7} value={text} placeholder="粘贴正文，或先从链接读取" maxLength={MAX_SOURCE_TEXT}
               disabled={!!busy} onChange={(event) => setText(event.target.value)} />
           </Field>
-          <Field label="相似稿数量" hint={`可生成 0 到 ${MAX_VARIANTS} 条相似稿。每批另保留 1 条原文。`}>
-            <input type="number" min={0} max={MAX_VARIANTS} step={1} value={count}
-              disabled={!!busy} onChange={(event) => setCount(event.target.value)} required />
-          </Field>
+          <div className="post-generation-fields">
+            <Field label="相似稿数量" hint={`可生成 0 到 ${MAX_VARIANTS} 条。另保留 1 条原文。`}>
+              <input type="number" min={0} max={MAX_VARIANTS} step={1} value={count}
+                disabled={!!busy} onChange={(event) => setCount(event.target.value)} required />
+            </Field>
+            <Field label="相似稿排版">
+              <select value={layout} disabled={!!busy || !countValid || number === 0}
+                onChange={(event) => setLayout(event.target.value as PostLayout)}>
+                {Object.entries(postLayouts).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </Field>
+          </div>
+          {aiConfigured && (
+            <Field label="自定义排版要求（选填）" className="post-format-requirements">
+              <textarea rows={2} maxLength={MAX_FORMAT_REQUIREMENTS} value={formatRequirements}
+                placeholder="例如：标题单独一行，条件逐条换行，标签放在最后。"
+                disabled={!!busy || !countValid || number === 0}
+                onChange={(event) => setFormatRequirements(event.target.value)} />
+            </Field>
+          )}
           <small className="field-hint">{aiConfigured
             ? "相似稿使用默认写作模型生成。"
             : "未设置写作模型时，示例模式仅调整标题和排版。"}</small>
