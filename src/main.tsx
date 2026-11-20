@@ -57,6 +57,7 @@ import {
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
 import { assignmentModes, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, type AssignmentMode, type PendingPost } from "./post-queue";
+import { modelProviders, type ModelProviderId, type ModelPurpose, type ModelSettings, type WorkspaceModel } from "./model-catalog";
 import "./styles.css";
 
 type Account = {
@@ -114,7 +115,7 @@ type Workspace = {
   proxies: Proxy[];
   profiles: Profile[];
   drafts: Draft[];
-  settings: { aiConfigured: boolean; xConfigured: boolean };
+  settings: { aiConfigured: boolean; publishAiConfigured: boolean; xConfigured: boolean };
   chromium?: { installed: boolean; version: string | null };
   workspaceScope?: "owner" | "customer";
   remoteBrowser?: boolean;
@@ -170,7 +171,7 @@ type CamoufoxResult = {
   status: "ok" | "skipped" | "error";
   message: string;
 };
-type Page = "overview" | "proxies" | "profiles" | "drafts" | "settings";
+type Page = "overview" | "proxies" | "profiles" | "drafts" | "models" | "settings";
 type EntityModal =
   | { type: "account"; item: Account }
   | { type: "proxy"; item?: Proxy }
@@ -188,7 +189,7 @@ const blank: Workspace = {
   proxies: [],
   profiles: [],
   drafts: [],
-  settings: { aiConfigured: false, xConfigured: false },
+  settings: { aiConfigured: false, publishAiConfigured: false, xConfigured: false },
   version: "0.1.0",
 };
 const nav: { id: Page; title: string; icon: typeof Users }[] = [
@@ -196,6 +197,7 @@ const nav: { id: Page; title: string; icon: typeof Users }[] = [
   { id: "profiles", title: "窗口管理", icon: Monitor },
   { id: "proxies", title: "代理网络", icon: Network },
   { id: "drafts", title: "内容工作室", icon: FileText },
+  { id: "models", title: "模型列表", icon: Sparkles },
 ];
 const statusText: Record<Draft["status"], string> = {
   draft: "草稿",
@@ -436,6 +438,7 @@ function App({
   const [camoufoxError, setCamoufoxError] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [publishing, setPublishing] = useState<Draft | null>(null);
+  const [reviewing, setReviewing] = useState<Draft | null>(null);
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
     null,
@@ -706,7 +709,8 @@ function App({
     proxies: ["代理网络", "配置 SOCKS5 出口，并检查连接状态。"],
     profiles: ["窗口管理", "在同一个窗口管理 X 账号、SOCKS5 代理和显示设置。"],
     drafts: ["内容工作室", "导入 X 或 Facebook 帖子，生成文案，再分配到账号。"],
-    settings: ["系统设置", "查看本地服务、AI 模型与 X 接入状态。"],
+    models: ["模型列表", "添加服务商的 API Key，并分别选择写作和发布审核模型。"],
+    settings: ["系统设置", "查看服务与 X 接入状态。"],
   }[page];
   function WindowTable({ preview = false }: { preview?: boolean }) {
     const list = preview
@@ -1624,17 +1628,17 @@ function App({
                       </span>
                       <div>
                         <h2>原文与相似稿</h2>
-                        <p>每批保留一条原文。相似稿暂用示例改写，可分配给不同账号。</p>
+                        <p>每批保留一条原文。生成的相似稿可分配给不同账号。</p>
                       </div>
                     </div>
                     <div className="studio-connection">
                       <span
                         className={`state-dot ${data.settings.aiConfigured ? "ok" : ""}`}
                       />
-                      示例模式
+                      {data.settings.aiConfigured ? "已设置写作模型" : "示例模式"}
                       <button
                         className="text-button"
-                        onClick={() => go("settings")}
+                        onClick={() => go("models")}
                       >
                         <Icon icon={ArrowUpRight} size={15} />
                         <span className="sr-only">查看模型配置</span>
@@ -1801,6 +1805,11 @@ function App({
                                       >
                                         编辑
                                       </Button>
+                                      {data.settings.publishAiConfigured && draft.text.trim() && (
+                                        <Button variant="ghost" icon={Sparkles} onClick={() => setReviewing(draft)}>
+                                          AI 审核
+                                        </Button>
+                                      )}
                                       {data.settings.xConfigured ? (
                                         <Button
                                           icon={Send}
@@ -1862,42 +1871,19 @@ function App({
                   </p>
                 </>
               )}
+              {page === "models" && <ModelPage onChange={() => refresh()} />}
               {page === "settings" && (
                 <div className="settings-grid">
                   <section className="panel settings-section">
                     <div className="settings-section-heading">
-                      <span className="settings-symbol">
-                        <Icon icon={Sparkles} size={23} />
-                      </span>
+                      <span className="settings-symbol"><Icon icon={Sparkles} size={23} /></span>
                       <div>
-                        <h2>AI 内容模型</h2>
-                        <p>使用兼容 OpenAI 格式的模型接口生成草稿。</p>
+                        <h2>AI 模型</h2>
+                        <p>配置当前工作空间的写作与发布审核模型。</p>
                       </div>
-                      <Badge
-                        tone={data.settings.aiConfigured ? "green" : "neutral"}
-                      >
-                        {data.settings.aiConfigured ? "已配置" : "未配置"}
-                      </Badge>
                     </div>
                     <div className="settings-content">
-                      <p>
-                        {customer
-                          ? data.settings.aiConfigured
-                            ? "可在内容创作页生成草稿。"
-                            : "管理员配置模型后，即可生成草稿。"
-                          : "在服务端设置模型变量后，重启 Node X。"}
-                      </p>
-                      {!customer && (
-                        <CodeBlock
-                          text={
-                            "AI_BASE_URL=https://api.example.com/v1\nAI_API_KEY=你的模型密钥\nAI_MODEL=你的模型名称"
-                          }
-                        />
-                      )}
-                      <div className="helper-note">
-                        <Icon icon={ShieldCheck} size={16} />
-                        <p>模型密钥由服务器保存。</p>
-                      </div>
+                      <Button icon={ArrowRight} onClick={() => go("models")}>打开模型列表</Button>
                     </div>
                   </section>
                   <section className="panel settings-section">
@@ -2014,6 +2000,7 @@ function App({
       )}
       {postImportOpen && (
         <PostImportDialog
+          aiConfigured={data.settings.aiConfigured}
           onClose={() => setPostImportOpen(false)}
           onCreated={async (count) => {
             setPostImportOpen(false);
@@ -2122,6 +2109,21 @@ function App({
             </Button>
           </div>
         </Dialog>
+      )}
+      {reviewing && (
+        <DraftReviewDialog
+          draft={reviewing}
+          account={accountName(reviewing.accountId)}
+          onClose={() => setReviewing(null)}
+          onContinue={() => {
+            if (data.settings.xConfigured) {
+              setPublishing(reviewing);
+            } else {
+              void openDraftInX(reviewing);
+            }
+            setReviewing(null);
+          }}
+        />
       )}
       {publishing && (
         <PublishDialog
@@ -3870,9 +3872,11 @@ function CreateWindowDialog({
 }
 
 function PostImportDialog({
+  aiConfigured,
   onClose,
   onCreated,
 }: {
+  aiConfigured: boolean;
   onClose: () => void;
   onCreated: (count: number) => Promise<void>;
 }) {
@@ -3942,7 +3946,9 @@ function PostImportDialog({
             <input type="number" min={0} max={MAX_VARIANTS} step={1} value={count}
               disabled={!!busy} onChange={(event) => setCount(event.target.value)} required />
           </Field>
-          <small className="field-hint">示例模式会调整标题和排版，供检查流程。</small>
+          <small className="field-hint">{aiConfigured
+            ? "相似稿使用默认写作模型生成。"
+            : "未设置写作模型时，示例模式仅调整标题和排版。"}</small>
           {error && <p className="form-error" role="alert">{error}</p>}
         </div>
         <div className="dialog-footer">
@@ -4006,8 +4012,9 @@ function PendingPostsPanel({
             <div>
               <div className="post-queue-meta">
                 <Badge tone={post.variant === 0 ? "blue" : "neutral"}>
-                  {post.variant === 0 ? "原文" : `示例改写 ${post.variant}`}
+                  {post.variant === 0 ? "原文" : `${post.generatedBy ? "AI 改写" : "示例改写"} ${post.variant}`}
                 </Badge>
+                {post.generatedBy && <small className="subtle">{post.generatedBy}</small>}
                 {post.assignedCount > 0 && <small className="subtle">已分配 {post.assignedCount} 个账号</small>}
                 {post.sourceUrl && <a href={post.sourceUrl} target="_blank" rel="noreferrer" className="text-button">
                   原帖 <Icon icon={ExternalLink} size={13} />
@@ -4119,6 +4126,228 @@ function PostDistributionDialog({
           <Button type="submit" variant="primary" icon={Send} disabled={!valid || saving} busy={saving}>创建发布草稿</Button>
         </div>
       </form>
+    </Dialog>
+  );
+}
+
+function ModelPage({ onChange }: { onChange: () => Promise<void> }) {
+  const [data, setData] = useState<ModelSettings | null>(null);
+  const [open, setOpen] = useState<WorkspaceModel | "new" | null>(null);
+  const [deleting, setDeleting] = useState<WorkspaceModel | null>(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
+
+  async function load() {
+    setMessage(null);
+    try {
+      setData(await request("/api/models"));
+    } catch (error) {
+      setMessage({ text: (error as Error).message, error: true });
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  async function update(path: string, method: string, body: unknown, success: string) {
+    setBusy(path);
+    setMessage(null);
+    try {
+      const next = await request(path, method, body);
+      if (path.endsWith("/test")) {
+        setMessage({ text: success });
+        return;
+      }
+      setData(next);
+      setDeleting(null);
+      setMessage({ text: success });
+      await onChange();
+    } catch (error) {
+      setMessage({ text: (error as Error).message, error: true });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function defaultField(purpose: ModelPurpose, label: string, hint: string) {
+    return (
+      <Field label={label} hint={hint}>
+        <select value={data?.defaults[purpose] ?? ""} disabled={!data?.models.length || !!busy}
+          onChange={(event) => void update("/api/models-defaults", "PATCH", {
+            purpose, modelId: event.target.value || null,
+          }, "默认模型已更新。")}>
+          <option value="">{purpose === "writing" && data?.legacyWriting ? "服务器默认模型" : "未设置"}</option>
+          {data?.models.map(model => <option value={model.id} key={model.id}>{modelProviders[model.provider].name} · {model.model}</option>)}
+        </select>
+      </Field>
+    );
+  }
+
+  return (
+    <div className="model-page">
+      <section className="panel model-panel">
+        <h2>默认模型</h2>
+        <div className="model-defaults">
+          {defaultField("writing", "写作模型", "用于生成草稿和相似稿。")}
+          {defaultField("publishing", "发布审核模型", "在草稿里点击「AI 审核」时检查正文并给出建议。")}
+        </div>
+      </section>
+      <section className="panel model-panel">
+        <div className="model-list-heading">
+          <h2>已添加的模型</h2>
+          <Button icon={Plus} variant="primary" disabled={!data || !!busy} onClick={() => setOpen("new")}>添加模型</Button>
+        </div>
+        {message && <p role={message.error ? "alert" : "status"}
+          className={message.error ? "form-error" : "model-feedback"}>{message.text}</p>}
+        {!data ? (message?.error ? <Button onClick={() => void load()}>重试</Button> : <p role="status">正在读取模型配置…</p>) :
+          data.models.length === 0 ? <p className="subtle">添加一个模型后，即可将它设为默认模型。</p> : (
+            <ul className="model-list">
+              {data.models.map(model => {
+                const testPath = `/api/models/${model.id}/test`;
+                return (
+                  <li key={model.id}>
+                    <div className="model-name">
+                      <strong>{modelProviders[model.provider].name}</strong>
+                      <code>{model.model}</code>
+                    </div>
+                    <div className="row-actions">
+                      <Button busy={busy === testPath} disabled={!!busy}
+                        onClick={() => void update(testPath, "POST", {}, `${model.model} 连接成功。`)}>测试连接</Button>
+                      <Button icon={Pencil} variant="ghost" disabled={!!busy} onClick={() => setOpen(model)}>编辑</Button>
+                      <IconButton icon={Trash2} label={`删除 ${model.model}`} disabled={!!busy} onClick={() => setDeleting(model)} />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+      </section>
+      {open && <ModelForm item={open === "new" ? undefined : open} onClose={() => setOpen(null)} onSaved={async next => {
+        setData(next);
+        setOpen(null);
+        setMessage({ text: "模型已保存。" });
+        await onChange();
+      }} />}
+      {deleting && (
+        <Dialog title="删除模型" description={`删除 ${deleting.model} 及其 API Key。使用此模型的默认项也会清除。`}
+          onClose={() => { if (!busy) setDeleting(null); }}>
+          <div className="dialog-footer">
+            <Button disabled={!!busy} onClick={() => setDeleting(null)}>取消</Button>
+            <Button variant="danger" busy={!!busy} disabled={!!busy}
+              onClick={() => void update(`/api/models/${deleting.id}`, "DELETE", undefined, "模型已删除。")}>删除模型</Button>
+          </div>
+          {message?.error && <p className="form-error" role="alert">{message.text}</p>}
+        </Dialog>
+      )}
+    </div>
+  );
+}
+
+function ModelForm({ item, onClose, onSaved }: {
+  item?: WorkspaceModel;
+  onClose: () => void;
+  onSaved: (data: ModelSettings) => Promise<void>;
+}) {
+  const [provider, setProvider] = useState<ModelProviderId>(item?.provider ?? "openai");
+  const [model, setModel] = useState(item?.model ?? modelProviders.openai.models[0]);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const entry = modelProviders[provider];
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const next = await request(item ? `/api/models/${item.id}` : "/api/models", item ? "PATCH" : "POST", {
+        provider, model, apiKey: key.trim() || undefined,
+      });
+      await onSaved(next);
+    } catch (error) {
+      setError((error as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog title={item ? "编辑模型" : "添加模型"} onClose={() => { if (!busy) onClose(); }}>
+      <form onSubmit={save}>
+        <div className="dialog-body">
+          <Field label="服务商">
+            <select autoFocus={!item} disabled={!!item || busy} value={provider} onChange={event => {
+              const next = event.target.value as ModelProviderId;
+              setProvider(next);
+              setModel(modelProviders[next].models[0] ?? "");
+              setKey("");
+            }}>
+              {Object.entries(modelProviders).map(([id, value]) => <option key={id} value={id}>{value.name}</option>)}
+            </select>
+          </Field>
+          {entry.models.length > 0 && (
+            <Field label="预设模型">
+              <select disabled={busy} value={entry.models.includes(model) ? model : ""} onChange={event => setModel(event.target.value)}>
+                <option value="">手动填写</option>
+                {entry.models.map(id => <option key={id} value={id}>{id}</option>)}
+              </select>
+            </Field>
+          )}
+          <Field label="模型 ID" hint={provider === "doubao" ? "可填写火山方舟控制台中的模型 ID 或推理接入点 ID（ep-…）。" : undefined}>
+            <input required maxLength={180} disabled={busy} value={model} spellCheck={false} onChange={event => setModel(event.target.value)} />
+          </Field>
+          <Field label="API Key" hint={item ? "留空可保留已保存的 API Key。" : "API Key 加密保存在当前工作空间。"}>
+            <input type="password" autoComplete="new-password" autoFocus={!!item} required={!item}
+              maxLength={2048} disabled={busy} value={key} onChange={event => setKey(event.target.value)} />
+          </Field>
+          {error && <p className="form-error" role="alert">{error}</p>}
+        </div>
+        <div className="dialog-footer">
+          <Button type="button" disabled={busy} onClick={onClose}>取消</Button>
+          <Button type="submit" variant="primary" busy={busy} disabled={busy || !model.trim() || (!item && !key.trim())}>保存模型</Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+function DraftReviewDialog({ draft, account, onClose, onContinue }: {
+  draft: Draft;
+  account: string;
+  onClose: () => void;
+  onContinue: () => void;
+}) {
+  const [result, setResult] = useState<{ model: string; advice: string; lengthIssue: string } | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function review() {
+    setBusy(true);
+    setError("");
+    try {
+      setResult(await request(`/api/drafts/${draft.id}/review`, "POST", {}));
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog title="AI 发布审核" description={`发布账号 ${account}`} onClose={onClose}>
+      <div className="dialog-body">
+        <p className="model-review-text">{draft.text}</p>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        {result && <section className="model-review-result" aria-live="polite">
+          <strong>{result.model}</strong>
+          {result.lengthIssue && <p className="form-error">{result.lengthIssue}</p>}
+          <p className="model-review-text">{result.advice}</p>
+        </section>}
+      </div>
+      <div className="dialog-footer">
+        <Button onClick={onClose}>关闭</Button>
+        {result ? <Button variant="primary" icon={Send} onClick={onContinue}>继续发布</Button>
+          : <Button variant="primary" icon={Sparkles} busy={busy} disabled={busy} onClick={() => void review()}>开始审核</Button>}
+      </div>
     </Dialog>
   );
 }

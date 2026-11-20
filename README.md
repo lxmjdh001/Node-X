@@ -71,11 +71,13 @@ CAMOUFOX_API_KEY=
 
 ## AI 和 X 配置
 
-复制 `.env.example` 为 `.env`，保存后重启服务。浏览器环境与草稿编辑不依赖这些配置。
+登录后在「模型列表」添加服务商、模型 ID 和 API Key，分别设置默认写作与发布审核模型。每个登录码工作空间独立保存配置。写作模型用于生成草稿和相似稿。发布审核模型用于检查已分配账号的草稿，由用户确认后继续发布。
+
+服务端选项可以在 `.env` 中配置，保存后重启服务。
 
 | 功能 | 配置 |
 | --- | --- |
-| AI 草稿 | `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL`。默认基础地址为 `https://api.openai.com/v1` |
+| 主空间写作备用模型 | `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL`。默认基础地址为 `https://api.openai.com/v1`，使用 Chat Completions |
 | X 发文 | 在 [X Developer Console](https://console.x.com/) 创建启用 OAuth 2.0 和读写权限的应用，填写 `X_CLIENT_ID`。保密客户端同时填写 `X_CLIENT_SECRET` |
 | X 回调 | 控制台与本地的 `X_REDIRECT_URI` 须完全一致，默认 `http://127.0.0.1:4173/api/x/callback`。授权时请使用相同的本机地址打开工作台 |
 

@@ -15,5 +15,6 @@ export type PendingPost = {
   sourceUrl: string | null;
   text: string;
   variant: number;
+  generatedBy: string | null;
   assignedCount: number;
 };

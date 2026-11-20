@@ -140,6 +140,7 @@ function openDatabase(directory: string): DatabaseSync {
     sourceUrl TEXT,
     text TEXT NOT NULL,
     variant INTEGER NOT NULL,
+    generatedBy TEXT,
     createdAt TEXT NOT NULL,
     UNIQUE (batchId, variant)
   ) STRICT;
@@ -149,20 +150,31 @@ function openDatabase(directory: string): DatabaseSync {
     draftId TEXT NOT NULL UNIQUE REFERENCES drafts(id) ON DELETE CASCADE,
     PRIMARY KEY (pendingPostId, accountId)
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS ai_models (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    encryptedKey TEXT NOT NULL,
+    UNIQUE (provider, model)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS ai_defaults (
+    purpose TEXT PRIMARY KEY CHECK (purpose IN ('writing', 'publishing')),
+    modelId TEXT NOT NULL REFERENCES ai_models(id) ON DELETE CASCADE
+  ) STRICT;
 `);
-  const preferenceColumns = [
-    ['deviceScaleFactor', 'REAL NOT NULL DEFAULT 1'],
-    ['colorScheme', "TEXT NOT NULL DEFAULT 'light'"],
-    ['reducedMotion', "TEXT NOT NULL DEFAULT 'no-preference'"],
+  const migrations = [
+    { table: 'profiles', column: 'deviceScaleFactor', definition: 'REAL NOT NULL DEFAULT 1' },
+    { table: 'profiles', column: 'colorScheme', definition: "TEXT NOT NULL DEFAULT 'light'" },
+    { table: 'profiles', column: 'reducedMotion', definition: "TEXT NOT NULL DEFAULT 'no-preference'" },
+    { table: 'pending_posts', column: 'generatedBy', definition: 'TEXT' },
   ];
-  const existing = () => new Set(db.prepare('PRAGMA table_info(profiles)').all().map((column) => column.name));
-  const present = existing();
-  if (preferenceColumns.some(([name]) => !present.has(name))) {
+  const missingColumns = () => migrations.filter(({ table, column }) =>
+    !db.prepare(`PRAGMA table_info(${table})`).all().some(info => info.name === column));
+  if (missingColumns().length) {
     db.exec('BEGIN IMMEDIATE');
     try {
-      const locked = existing();
-      for (const [name, definition] of preferenceColumns) {
-        if (!locked.has(name)) db.exec(`ALTER TABLE profiles ADD COLUMN ${name} ${definition}`);
+      for (const { table, column, definition } of missingColumns()) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
       }
       db.exec('COMMIT');
     } catch (error) {

@@ -39,7 +39,7 @@ runuser -u nodex -- env PLAYWRIGHT_BROWSERS_PATH=/var/lib/nodex/ms-playwright \
   node node_modules/playwright/cli.js install chromium --no-shell
 ```
 
-Configure `AI_API_KEY`, `AI_MODEL`, and optionally `AI_BASE_URL` in `runtime.env` to enable AI writing. With `NODEX_X_PUBLISH_MODE=browser`, customers sign in and post manually in X. For an alternate API deployment, set `NODEX_X_PUBLISH_MODE=api`, configure `X_CLIENT_ID`, the app's `X_CLIENT_SECRET` if applicable, and `X_REDIRECT_URI=https://xai.chuhai7.com/api/x/callback`. Register that exact redirect URI and enable write access in the X Developer Console. Each workspace authorizes its own X accounts.
+Each workspace configures its own API key and defaults under 模型列表. The owner workspace can use `AI_API_KEY`, `AI_MODEL`, and optionally `AI_BASE_URL` in `runtime.env` as a writing fallback. With `NODEX_X_PUBLISH_MODE=browser`, customers sign in and post manually in X. For an alternate API deployment, set `NODEX_X_PUBLISH_MODE=api`, configure `X_CLIENT_ID`, the app's `X_CLIENT_SECRET` if applicable, and `X_REDIRECT_URI=https://xai.chuhai7.com/api/x/callback`. Register that exact redirect URI and enable write access in the X Developer Console. Each workspace authorizes its own X accounts.
 
 For the optional customer Camoufox integration, create a separate trusted manager instance and data directory for each workspace, and set `NODEX_CUSTOMER_CAMOUFOX` to a JSON object keyed by license ID. Each value contains that instance's loopback `port` and `apiKey`. Keep manager ports unique, including the owner instance. The standard online Chromium runs without Camoufox.
 
