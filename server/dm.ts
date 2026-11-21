@@ -1,10 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Router, type Request } from 'express';
 import { z } from 'zod';
-import { ProtocolError, runConnector } from '../scripts/dm-matrix/connector.mjs';
+import { discoverBridgeAccount, ProtocolError, runConnector } from '../scripts/dm-matrix/connector.mjs';
 import { sessionHasAccess, workspaceAuthorized } from './auth.js';
+import { dmPublicUrl, publicDmFetch } from './dm-public-https.js';
 import { InputError, requireFound } from './errors.js';
 import { customerWorkspaceIds, reveal, row, rows, runInWorkspace, seal, workspaceDb, workspaceDirectory, workspaceId, write } from './store.js';
 
@@ -44,6 +45,14 @@ const bulkInput = z.object({
   label: labelSchema.optional(),
 });
 const replyInput = z.object({ text: z.string().trim().min(1).max(5000), requestId });
+const xHandle = /^[a-z0-9_]{1,15}$/i;
+const bridgeConfigInput = z.object({
+  matrixUrl: z.string().trim().min(1).max(2048),
+  bridgeProvisioningUrl: z.string().trim().min(1).max(2048),
+  matrixAccessToken: z.string().trim().min(1).max(3072).regex(/^[\x21-\x7e]+$/, 'Matrix 访问令牌格式无效。'),
+  username: z.string().trim().transform(value => value.replace(/^@/, '').toLowerCase())
+    .refine(value => xHandle.test(value), '请填写 X 用户名（@ 后面的名称）。'),
+});
 const resultInput = z.object({
   status: z.enum(['sent', 'failed', 'uncertain']),
   remoteId: remoteId.optional(),
@@ -56,7 +65,7 @@ type Ticket = {
   expires: number;
 };
 const tickets = new Map<string, Ticket>();
-type Account = { id: string; label: string; username: string; xUserId: string | null };
+type Account = { id: string; label: string; username: string; xUserId: string | null; xUsername?: string | null };
 type Connection = { accountId: string; tokenHash: string; lastSeenAt: string; lastSyncAt: string | null };
 type ManagedConnection = {
   status: 'starting' | 'syncing' | 'online' | 'offline' | 'failed';
@@ -65,6 +74,7 @@ type ManagedConnection = {
   done?: Promise<void>;
 };
 const managedConnections = new Map<string, ManagedConnection>();
+const configuring = new Map<string, AbortController>();
 let managedClosing = false;
 type Conversation = {
   id: string;
@@ -111,7 +121,7 @@ function transaction<T>(work: () => T): T {
 }
 
 function account(id: string) {
-  return requireFound(row<Account>('SELECT id, label, username, xUserId FROM accounts WHERE id = ?', id), '找不到这个 X 账号。');
+  return requireFound(row<Account>('SELECT id, label, username, xUserId, xUsername FROM accounts WHERE id = ?', id), '找不到这个 X 账号。');
 }
 
 function conversation(id: string) {
@@ -129,7 +139,8 @@ function bindAccount(accountId: string, workspace: string | undefined, xUserId: 
   return runInWorkspace(workspace, () => transaction(() => {
     const current = account(accountId);
     const last = row<{ xUserId: string | null }>('SELECT xUserId FROM dm_connections WHERE accountId = ?', accountId);
-    const expected = current.xUserId ?? last?.xUserId;
+    const self = row<{ xUserId: string }>('SELECT xUserId FROM dm_bridge_configs WHERE accountId = ?', accountId);
+    const expected = current.xUserId ?? last?.xUserId ?? self?.xUserId;
     if (expected && xUserId && expected !== xUserId) {
       throw new InputError('私信桥接的 X 账号与所选账号不一致。', 409);
     }
@@ -152,22 +163,28 @@ function connectionStatus(accountId: string) {
   const connection = row<Connection>('SELECT * FROM dm_connections WHERE accountId = ?', accountId);
   const paired = Boolean(connection);
   const config = managedConfig(accountId);
+  const fileConfigured = existsSync(config);
+  const selfConfigured = !fileConfigured && Boolean(row('SELECT 1 FROM dm_bridge_configs WHERE accountId = ?', accountId));
+  const details = { paired, selfConfigured };
   const managed = managedConnections.get(config);
   const online = connection && connection.lastSeenAt > before(onlineMs);
   if (managed && !managed.controller.signal.aborted) {
-    if (managed.status === 'online' && !online) return { status: 'offline', paired };
-    return { status: managed.status, message: managed.message, paired };
+    if (managed.status === 'online' && !online) return { status: 'offline', ...details };
+    return { status: managed.status, message: managed.message, ...details };
   }
-  if (online) return { status: 'online', paired };
-  if (paired) return { status: 'offline', paired };
-  return existsSync(config) ? { status: 'idle', paired } : {
-    status: 'unconfigured', paired, message: '此账号还未配置私信桥接，请联系管理员完成配置。',
-  };
+  if (online) return { status: 'online', ...details };
+  if (paired) return { status: 'offline', ...details };
+  return { status: fileConfigured || selfConfigured ? 'idle' : 'unconfigured', ...details };
 }
 
 function startManaged(accountId: string, authorize?: () => boolean) {
   const config = managedConfig(accountId);
-  if (managedClosing || managedConnections.get(config)?.done || !existsSync(config)) return;
+  if (managedClosing || managedConnections.get(config)?.done) return;
+  const fileConfigured = existsSync(config);
+  const saved = fileConfigured ? undefined : row<{ sealedConfig: string }>(
+    'SELECT sealedConfig FROM dm_bridge_configs WHERE accountId = ?', accountId);
+  if (!fileConfigured && !saved) return;
+  if (saved) mkdirSync(dirname(config), { recursive: true, mode: 0o700 });
   const workspace = workspaceId();
   const task: ManagedConnection = { status: 'starting', controller: new AbortController() };
   managedConnections.set(config, task);
@@ -185,6 +202,7 @@ function startManaged(accountId: string, authorize?: () => boolean) {
     warn: () => {},
     managed: {
       nodeXUrl: process.env.NODEX_PUBLIC_ORIGIN?.trim() || `http://127.0.0.1:${process.env.PORT || 4173}`,
+      ...(saved && { readConfig: () => JSON.parse(reveal(saved.sealedConfig)), transport: publicDmFetch }),
       hasToken: (token, xUserId) => workspaceAuthorized(workspace) && Boolean(runInWorkspace(workspace, () => row(`
         SELECT 1 FROM dm_connections d JOIN accounts a ON a.id = d.accountId
         WHERE d.accountId = ? AND d.tokenHash = ? AND COALESCE(a.xUserId, d.xUserId) = ?
@@ -234,6 +252,7 @@ export function restoreManagedDm() {
 
 export async function shutdownManagedDm() {
   managedClosing = true;
+  for (const probe of configuring.values()) probe.abort();
   const tasks = [...managedConnections.values()];
   for (const task of tasks) task.controller.abort();
   await Promise.allSettled(tasks.map(task => task.done));
@@ -387,8 +406,73 @@ dm.get('/dm/accounts/:id/connect', (req, res) => {
   res.json(connectionStatus(accountId));
 });
 
+function requireEditableBridge(accountId: string) {
+  const config = managedConfig(accountId);
+  if (existsSync(config)) throw new InputError('该账号正在使用管理员配置的私信桥接。', 409);
+  if (managedConnections.get(config)?.done || row('SELECT 1 FROM dm_connections WHERE accountId = ?', accountId)) {
+    throw new InputError('请先断开私信连接，再更新桥接配置。', 409);
+  }
+}
+
+function checkBridgeUsername(current: Account, username: string) {
+  const expected = (current.xUsername || current.username).replace(/^@/, '').toLowerCase();
+  if (xHandle.test(expected) && expected !== username) {
+    throw new InputError('填写的 X 用户名与窗口管理中登记的用户名不一致。', 409);
+  }
+}
+
+dm.post('/dm/accounts/:id/connect-config', async (req, res) => {
+  const current = account(id.parse(req.params.id));
+  const { username, matrixAccessToken, matrixUrl, bridgeProvisioningUrl } = bridgeConfigInput.parse(req.body);
+  const config = {
+    matrixUrl: dmPublicUrl(matrixUrl, 'matrix'),
+    bridgeProvisioningUrl: dmPublicUrl(bridgeProvisioningUrl, 'bridge'),
+    matrixAccessToken,
+  };
+  const path = managedConfig(current.id);
+  requireEditableBridge(current.id);
+  checkBridgeUsername(current, username);
+  if (configuring.has(path)) throw new InputError('正在验证此账号的桥接配置，请稍后再试。', 409);
+  if (managedClosing || configuring.size >= 20) throw new InputError('桥接配置验证繁忙，请稍后再试。', 503);
+  const controller = new AbortController();
+  configuring.set(path, controller);
+  const authorize = sessionHasAccess(req);
+  const abort = () => controller.abort();
+  res.once('close', abort);
+  try {
+    const verified = await discoverBridgeAccount(config, username, {
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]), transport: publicDmFetch,
+    });
+    controller.signal.throwIfAborted();
+    if (!authorize() || !workspaceAuthorized(workspaceId())) throw new InputError('工作空间授权已失效。', 401);
+    requireEditableBridge(current.id);
+    const latest = account(current.id);
+    checkBridgeUsername(latest, username);
+    const previous = row<{ xUserId: string }>('SELECT xUserId FROM dm_bridge_configs WHERE accountId = ?', current.id);
+    if ([latest.xUserId, previous?.xUserId].some(expected => expected && expected !== verified.xUserId)) {
+      throw new InputError('这个桥接对应另一个 X 账号，请核对当前窗口和桥接中的登录账号。', 409);
+    }
+    write(`
+      INSERT INTO dm_bridge_configs (accountId, xUserId, sealedConfig) VALUES (?, ?, ?)
+      ON CONFLICT(accountId) DO UPDATE SET sealedConfig = excluded.sealedConfig
+    `, current.id, verified.xUserId, seal(JSON.stringify({ ...config, ...verified })));
+    clearTickets(current.id, workspaceId());
+    startManaged(current.id, authorize);
+    res.json(connectionStatus(current.id));
+  } catch (error) {
+    if (res.destroyed) return;
+    if (controller.signal.aborted) throw new InputError('私信服务正在重启，请稍后再试。', 503);
+    if (error instanceof ProtocolError) throw new InputError(error.message, 422);
+    throw error;
+  } finally {
+    res.off('close', abort);
+    configuring.delete(path);
+  }
+});
+
 dm.post('/dm/accounts/:id/connect', (req, res) => {
   const { id: accountId } = account(id.parse(req.params.id));
+  if (configuring.has(managedConfig(accountId))) throw new InputError('正在验证此账号的桥接配置，请稍后再试。', 409);
   if (connectionStatus(accountId).status !== 'online') startManaged(accountId, sessionHasAccess(req));
   res.json(connectionStatus(accountId));
 });

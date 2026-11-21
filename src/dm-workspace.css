@@ -302,6 +302,8 @@
 .dm-connect-body { display: grid; gap: 11px; }
 .dm-connect-body[hidden] { display: none; }
 .dm-connect-body > p { margin: 0; }
+.dm-connect-config { display: grid; gap: 12px; min-width: 0; border: 0; padding: 0; margin: 0; }
+.dm-connect-config > p, .dm-connect-config > .field { margin: 0; }
 .dm-history-button { margin: 0 auto 12px; display: flex; }
 
 .dm-mobile-account, .dm-workspace .dm-mobile-connect, .dm-workspace .dm-back { display: none; }

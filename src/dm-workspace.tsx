@@ -5,11 +5,18 @@ import "./dm-workspace.css";
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Account = { id: string; label: string; username: string; connected: boolean; lastSyncAt: string | null };
-type ConnectAccount = Pick<Account, "id" | "label"> & Partial<Pick<Account, "connected">>;
+type ConnectAccount = Pick<Account, "id" | "label" | "username"> & Partial<Pick<Account, "connected">>;
 type ConnectionStatus = {
   status: "unconfigured" | "idle" | "starting" | "syncing" | "online" | "offline" | "failed";
   message?: string;
   paired: boolean;
+  selfConfigured?: boolean;
+};
+type BridgeConfiguration = {
+  matrixUrl: string;
+  bridgeProvisioningUrl: string;
+  matrixAccessToken: string;
+  username: string;
 };
 type Conversation = {
   id: string;
@@ -38,7 +45,7 @@ const shortDate = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "num
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
 const sendStatus = { queued: "等待连接器发送", sent: "已发送", failed: "发送失败", uncertain: "结果待确认" };
 const connectionMessages: Record<ConnectionStatus["status"], string> = {
-  unconfigured: "请联系管理员为此账号配置私信桥接。",
+  unconfigured: "此账号还未配置私信桥接。",
   idle: "已找到此账号的私信桥接。连接后可在私信工作室查看消息。",
   starting: "正在启动私信连接。",
   syncing: "已连接桥接，正在等待首次同步。",
@@ -49,6 +56,13 @@ const connectionMessages: Record<ConnectionStatus["status"], string> = {
 
 function connecting(status?: ConnectionStatus["status"]) {
   return status === "starting" || status === "syncing";
+}
+
+const usernamePattern = "@?[A-Za-z0-9_]{1,15}";
+const validUsername = new RegExp(`^${usernamePattern}$`);
+
+function normalizedUsername(username: string) {
+  return username.trim().replace(/^@/, "");
 }
 
 function time(value: string, format = shortDate) {
@@ -493,19 +507,24 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
   const [checkPaused, setCheckPaused] = useState(false);
   const [busy, setBusy] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [editingConfiguration, setEditingConfiguration] = useState(false);
   const [error, setError] = useState("");
   const startOnFirstCheck = useRef(autoStart && accounts.length === 1);
   const account = accounts.find(item => item.id === accountId);
   const status = connection?.status;
   const pending = connecting(status);
+  const canConfigure = Boolean(account && status && !connection?.paired && !pending && status !== "online");
+  const canEditConfiguration = canConfigure && connection?.selfConfigured;
+  const showConfiguration = canConfigure && (status === "unconfigured" || (editingConfiguration && canEditConfiguration));
   const path = `/api/dm/accounts/${accountId}/connect`;
 
-  const startConnection = useCallback(async () => {
+  const startConnection = useCallback(async (configuration?: BridgeConfiguration) => {
     setBusy(true);
     setError("");
     try {
-      const next = await request<ConnectionStatus>(path, "POST", {});
+      const next = await request<ConnectionStatus>(configuration ? `${path}-config` : path, "POST", configuration ?? {});
       setConnection(next);
+      setEditingConfiguration(false);
       if (connecting(next.status)) setCheckAttempt(attempt => attempt + 1);
     } catch (cause) {
       setError((cause as Error).message);
@@ -556,7 +575,18 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
 
   function connect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!account || !status || busy || disconnecting || pending || checkPaused || status === "unconfigured" || status === "online") return;
+    if (!account || !status || busy || disconnecting || pending || checkPaused || status === "online") return;
+    if (showConfiguration) {
+      const fields = new FormData(event.currentTarget);
+      void startConnection({
+        matrixUrl: String(fields.get("matrixUrl") ?? "").trim(),
+        bridgeProvisioningUrl: String(fields.get("bridgeProvisioningUrl") ?? "").trim(),
+        matrixAccessToken: String(fields.get("matrixAccessToken") ?? "").trim(),
+        username: normalizedUsername(String(fields.get("username") ?? "")),
+      });
+      return;
+    }
+    if (status === "unconfigured") return;
     void startConnection();
   }
 
@@ -566,7 +596,12 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
     setError("");
     try {
       await request(`/api/dm/accounts/${accountId}/disconnect`, "POST", {});
-      close();
+      if (connection?.selfConfigured) {
+        setConnection(undefined);
+        setDisconnecting(false);
+      } else {
+        close();
+      }
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -577,12 +612,13 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
   const statusMessage = account
     ? connection?.message || (status ? connectionMessages[status] : "正在检查私信连接状态…")
     : "请选择要连接的 X 账号。";
+  const username = account?.username.trim() ?? "";
 
   return (
     <Dialog title={disconnecting ? "断开私信连接" : "连接 X 私信"}
       description={disconnecting ? `停止「${account?.label}」的私信同步和发送，保留已同步的记录。` : undefined}
       onClose={() => !busy && close()}>
-      <form onSubmit={connect}>
+      <form onSubmit={connect} autoComplete="off">
         <div className="dialog-body dm-connect-body" hidden={disconnecting}>
           {accounts.length === 1 && account ? (
             <Field label="X 账号"><input readOnly value={account.label} /></Field>
@@ -591,6 +627,7 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
               <select value={account ? accountId : ""} disabled={busy} onChange={event => {
                 setAccountId(event.target.value);
                 setConnection(undefined);
+                setEditingConfiguration(false);
                 setCheckPaused(false);
                 setError("");
               }}>
@@ -599,20 +636,48 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
               </select>
             </Field>
           )}
-          {error || status === "failed"
+          {showConfiguration && (
+            <fieldset className="dm-connect-config" key={accountId} disabled={busy || disconnecting}>
+              <p className="subtle">先在 mautrix 桥接中登录当前 X 账号，再填写以下信息。</p>
+              <Field label="Matrix HTTPS 地址">
+                <input type="url" name="matrixUrl" placeholder="https://matrix.example.com" pattern="https://.+" required />
+              </Field>
+              <Field label="mautrix 配置接口 HTTPS 地址">
+                <input type="url" name="bridgeProvisioningUrl" placeholder="https://bridge.example.com/_matrix/provision" pattern="https://.+" required />
+              </Field>
+              <Field label="Matrix 访问令牌">
+                <input type="password" name="matrixAccessToken" autoComplete="new-password" required />
+              </Field>
+              <Field label="X 用户名">
+                <input name="username" defaultValue={validUsername.test(username) ? normalizedUsername(username) : ""}
+                  pattern={usernamePattern} maxLength={16} autoCapitalize="none" spellCheck={false} required />
+              </Field>
+            </fieldset>
+          )}
+          {error || (!showConfiguration && status === "failed")
             ? <p className="form-error" role="alert">{error || statusMessage}</p>
-            : <p className="subtle" role="status">{statusMessage}</p>}
+            : !showConfiguration && <p className="subtle" role="status">{statusMessage}</p>}
           {checkPaused && pending && !error && <p className="subtle">后台仍在连接。可以关闭弹窗，稍后回来查看，或立即刷新状态。</p>}
         </div>
         {disconnecting && error && <p className="form-error dialog-body" role="alert">{error}</p>}
         <div className="dialog-footer">
-          <Button type="button" disabled={busy} onClick={() => disconnecting ? setDisconnecting(false) : close()}>{disconnecting ? "取消" : "关闭"}</Button>
+          <Button type="button" disabled={busy} onClick={() => {
+            if (disconnecting) setDisconnecting(false);
+            else if (editingConfiguration) {
+              setEditingConfiguration(false);
+              setError("");
+            } else close();
+          }}>{disconnecting || editingConfiguration ? "取消" : "关闭"}</Button>
           {disconnecting ? <Button type="button" variant="danger" busy={busy} onClick={() => void disconnect()}>断开连接</Button> : (
             <div>
               {account && connection?.paired && <Button type="button" variant="ghost" disabled={busy}
                 onClick={() => { setError(""); setDisconnecting(true); }}>断开连接</Button>}
+              {canEditConfiguration && !showConfiguration && <Button type="button" variant="ghost" disabled={busy}
+                onClick={() => { setError(""); setEditingConfiguration(true); }}>更新配置</Button>}
               {account && checkPaused ? (
                 <Button type="button" variant="primary" icon={RefreshCw} onClick={() => setCheckAttempt(attempt => attempt + 1)}>刷新状态</Button>
+              ) : showConfiguration ? (
+                <Button type="submit" variant="primary" icon={Link2} busy={busy}>保存并连接</Button>
               ) : account && status === "online" && openInbox ? (
                 <Button type="button" variant="primary" icon={Inbox} onClick={() => openInbox(accountId)}>打开私信</Button>
               ) : account && status !== "unconfigured" && status !== "online" ? (

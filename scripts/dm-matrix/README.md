@@ -9,7 +9,13 @@
 3. 在桥接配置中启用 `matrix.message_status_events: true`。Node X 在桥接确认后才标记「已发送」。Matrix 自身收到消息只表示已受理。
 4. 此连接器读写 Matrix 侧的普通私有房间，并在日志中提示跳过 Matrix 端到端加密房间。X Chat 侧的加密由 `mautrix-twitter` 处理。现阶段同步近期文本和后续新增文本。附件、撤回和编辑需要后续支持。
 
-## 在窗口管理连接
+## 客户自助连接
+
+在「窗口管理」对应的账号点击「连接私信」。如果账号尚未配置，填入 Matrix 的 HTTPS 地址、mautrix provisioning 的 HTTPS 地址、专用 Matrix 用户的访问令牌和 X 用户名，再点击「保存并连接」。这两个地址须能从 Node X 通过公网 HTTPS 443 访问。常见的 provisioning 路径是 `/_matrix/provision`。
+
+先在 mautrix 中登录该 X 账号，并按提示完成 X Chat 验证。桥接需启用 `provisioning.allow_matrix_auth`。Node X 根据 X 用户名核对桥接登录，自动识别 X 数字用户编号及机器人。访问令牌在工作空间数据库中加密保存，网页只读取连接状态。断开后可以在同一弹窗更新配置，已同步的消息保留。配置成功后，从窗口管理再次点击「连接私信」可直接启动同步。
+
+## 管理员预配置
 
 管理员在对应工作空间的 `dm-matrix` 子目录放置 `<Node X 账号 UUID>.json`。管理员工作空间的根目录是 `NODEX_DATA_DIR`，客户工作空间使用 `NODEX_DATA_DIR/customers/<工作空间 UUID>`。JSON 文件属于 Node X 服务用户，权限为 `0600`。每个账号使用自己的配置文件。账号 UUID 是 Node X 内部编号，`xUserId` 是 mautrix 的 X 数字用户编号。
 

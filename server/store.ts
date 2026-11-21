@@ -175,6 +175,11 @@ function openDatabase(directory: string): DatabaseSync {
     lastSeenAt TEXT NOT NULL,
     lastSyncAt TEXT
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS dm_bridge_configs (
+    accountId TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    xUserId TEXT NOT NULL,
+    sealedConfig TEXT NOT NULL
+  ) STRICT;
   CREATE TABLE IF NOT EXISTS dm_conversations (
     id TEXT PRIMARY KEY,
     accountId TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

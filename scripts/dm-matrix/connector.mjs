@@ -121,10 +121,10 @@ async function readResponse(response) {
   }
 }
 
-async function api({ base, path, service, token, method = 'GET', body, signal, timeout = 15_000 }) {
+async function api({ base, path, service, token, method = 'GET', body, signal, timeout = 15_000, transport = fetch }) {
   let response;
   try {
-    response = await fetch(base + path, {
+    response = await transport(base + path, {
       method, redirect: 'error',
       signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
       headers: {
@@ -140,7 +140,50 @@ async function api({ base, path, service, token, method = 'GET', body, signal, t
     await response.body?.cancel().catch(() => {});
     throw new ProtocolError(`${service} 返回 HTTP ${response.status}。`, response.status);
   }
-  return readResponse(response);
+  try {
+    return await readResponse(response);
+  } catch (error) {
+    if (error instanceof ProtocolError) throw error;
+    throw new ProtocolError(`${service} 响应读取中断。`);
+  }
+}
+
+async function matrixIdentity(config, signal, transport) {
+  const identity = await api({ base: config.matrixUrl, path: MATRIX + '/account/whoami',
+    token: config.matrixAccessToken, service: 'Matrix', signal, transport });
+  if (!matrixId(identity?.user_id, '@') || identity.user_id === config.bridgeBotId) {
+    throw new ProtocolError('请使用已连接该 X 账号的普通 Matrix 用户凭据。');
+  }
+  return identity.user_id;
+}
+
+function bridgeIdentity(config, userId, signal, transport) {
+  return api({ base: config.bridgeProvisioningUrl,
+    path: '/v3/whoami?' + new URLSearchParams({ user_id: userId }),
+    token: config.matrixAccessToken, service: 'mautrix', signal, transport });
+}
+
+function normalizedUsername(value) {
+  return typeof value === 'string' ? value.replace(/^@/, '').toLowerCase() : '';
+}
+
+export async function discoverBridgeAccount(config, username, { signal, transport }) {
+  const userId = await matrixIdentity(config, signal, transport);
+  const bridge = await bridgeIdentity(config, userId, signal, transport);
+  if (bridge?.network?.network_id !== 'twitter' || !matrixId(bridge.bridge_bot, '@')) {
+    throw new ProtocolError('该地址未返回有效的 mautrix Twitter 桥接信息。');
+  }
+  if (bridge.bridge_bot === userId) throw new ProtocolError('请使用自己的 Matrix 用户凭据。');
+  const matches = events(bridge.logins).filter(login =>
+    normalizedUsername(login.profile?.username || login.name) === normalizedUsername(username));
+  if (matches.length !== 1 || typeof matches[0].id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(matches[0].id)) {
+    throw new ProtocolError('桥接中未找到匹配的 X 用户名。请确认对应账号已在 mautrix 完成登录。');
+  }
+  const login = matches[0];
+  if (login.state?.state_event !== 'CONNECTED') {
+    throw new ProtocolError('这个 X 账号在 mautrix 中还未就绪，请完成登录和 X Chat 验证后再试。');
+  }
+  return { xUserId: login.id, bridgeBotId: bridge.bridge_bot };
 }
 
 function events(value) {
@@ -219,16 +262,11 @@ function filter(config) {
 async function connect(config, stateFile, { signal, managed, log = console.log, warn = console.warn } = {}) {
   const stop = signal ?? new AbortController().signal;
   const mx = (path, opts) => api({ base: config.matrixUrl, path: MATRIX + path, service: 'Matrix',
-    token: config.matrixAccessToken, signal: stop, ...opts });
-  const identity = await mx('/account/whoami');
-  if (!matrixId(identity.user_id, '@') || identity.user_id === config.bridgeBotId) {
-    throw new ProtocolError('请使用已连接该 X 账号的普通 Matrix 用户凭据。');
-  }
+    token: config.matrixAccessToken, signal: stop, transport: managed?.transport, ...opts });
+  const matrixUserId = await matrixIdentity(config, stop, managed?.transport);
   let bridgeCheckedAt = 0;
   const checkBridge = async () => {
-    const bridge = await api({ base: config.bridgeProvisioningUrl,
-      path: '/v3/whoami?' + new URLSearchParams({ user_id: identity.user_id }),
-      token: config.matrixAccessToken, service: 'mautrix', signal: stop });
+    const bridge = await bridgeIdentity(config, matrixUserId, stop, managed.transport);
     if (bridge.bridge_bot !== config.bridgeBotId) throw new ProtocolError('私信桥接机器人与账号配置不符。', 409);
     const login = Array.isArray(bridge.logins) && bridge.logins.find(item => item?.id === config.xUserId);
     if (!login || login.state?.state_event === 'BAD_CREDENTIALS') {
@@ -238,8 +276,8 @@ async function connect(config, stateFile, { signal, managed, log = console.log, 
     bridgeCheckedAt = Date.now();
   };
   if (managed) await checkBridge();
-  const ownIds = new Set([identity.user_id, config.matrixSelfPuppetId]);
-  const scope = createHash('sha256').update(JSON.stringify({ ...config, pairTicket: null, matrixUser: identity.user_id })).digest('hex');
+  const ownIds = new Set([matrixUserId, config.matrixSelfPuppetId]);
+  const scope = createHash('sha256').update(JSON.stringify({ ...config, pairTicket: null, matrixUser: matrixUserId })).digest('hex');
   let state;
   try { state = await readPrivateJson(stateFile); } catch (err) {
     if (err.code !== 'ENOENT') throw err;
@@ -337,7 +375,7 @@ async function connect(config, stateFile, { signal, managed, log = console.log, 
         warnOnce(id + ':limited', '某个会话在 Matrix 返回的近期记录中存在间隔。最新消息仍会同步。');
       }
       observed.set(id, timeline);
-      const messages = timeline.map(evt => normalizeText(evt, ownIds, identity.user_id, config.bridgeBotId)).filter(Boolean);
+      const messages = timeline.map(evt => normalizeText(evt, ownIds, matrixUserId, config.bridgeBotId)).filter(Boolean);
       const title = [next.title, next.bridgeTitle].find(value => typeof value === 'string' && value.trim()) ?? id;
       for (let offset = 0; offset < Math.max(1, messages.length); offset += 10) {
         const chunk = messages.slice(offset, offset + 10);
@@ -448,8 +486,8 @@ async function connect(config, stateFile, { signal, managed, log = console.log, 
 
 export async function runConnector(configFile, options) {
   const stateFile = configFile + '.state.json';
-  const raw = await readPrivateJson(configFile);
   const managed = options.managed;
+  const raw = managed?.readConfig ? managed.readConfig() : await readPrivateJson(configFile);
   const config = managed ? {
     ...readConfig({ ...raw, nodeXUrl: managed.nodeXUrl, pairTicket: null }),
     bridgeProvisioningUrl: provisioningUrl(raw?.bridgeProvisioningUrl),

@@ -1,4 +1,5 @@
 import { lookup } from 'node:dns/promises';
+import type { LookupAddress } from 'node:dns';
 import { BlockList, isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { InputError } from './errors.js';
@@ -18,6 +19,8 @@ for (const [host, bits] of [['2001::', 23], ['2001:db8::', 32], ['2002::', 16], 
 const globalIPv6 = new BlockList();
 globalIPv6.addSubnet('2000::', 3, 'ipv6');
 
+class NonPublicAddressError extends Error {}
+
 function publicAddress(address: string, local: BlockList): boolean {
   const family = isIP(address);
   if (family === 4) return !blocked.check(address) && !local.check(address);
@@ -25,8 +28,7 @@ function publicAddress(address: string, local: BlockList): boolean {
     !blocked.check(address, 'ipv6') && !local.check(address, 'ipv6');
 }
 
-/** Resolve once and connect to that literal IP, even if a customer's DNS later changes. */
-export async function publicProxy(proxy: ProxySettings): Promise<ProxySettings> {
+function localAddresses(): BlockList {
   const local = new BlockList();
   for (const addresses of Object.values(networkInterfaces())) {
     for (const { address } of addresses ?? []) {
@@ -34,17 +36,49 @@ export async function publicProxy(proxy: ProxySettings): Promise<ProxySettings> 
       local.addAddress(host, isIP(host) === 6 ? 'ipv6' : 'ipv4');
     }
   }
-  let candidates: { address: string }[];
+  return local;
+}
+
+export function isPublicAddress(address: string): boolean {
+  return publicAddress(address, localAddresses());
+}
+
+async function resolveAddresses(host: string, signal?: AbortSignal): Promise<LookupAddress[]> {
+  signal?.throwIfAborted();
+  const family = isIP(host);
+  if (family) return [{ address: host, family }];
+  if (!signal) return lookup(host, { all: true });
+
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    lookup(host, { all: true }).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
+/** Reject mixed answers and return an address the caller can pin for this connection. */
+export async function resolvePublicAddress(host: string, signal?: AbortSignal): Promise<LookupAddress> {
+  const candidates = await resolveAddresses(host, signal);
+  signal?.throwIfAborted();
+  const local = localAddresses();
+  if (!candidates.length || candidates.some(({ address, family }) =>
+    family !== isIP(address) || !publicAddress(address, local))) {
+    throw new NonPublicAddressError('Expected only public internet addresses');
+  }
+  return candidates.find(({ family }) => family === 4) ?? candidates[0];
+}
+
+/** Resolve once and connect to that literal IP, even if a customer's DNS later changes. */
+export async function publicProxy(proxy: ProxySettings): Promise<ProxySettings> {
   try {
-    candidates = isIP(proxy.host) ? [{ address: proxy.host }] : await lookup(proxy.host, { all: true });
-  } catch {
+    const { address } = await resolvePublicAddress(proxy.host);
+    return { ...proxy, host: address };
+  } catch (error) {
+    if (error instanceof NonPublicAddressError) {
+      throw new InputError('线上浏览器和代理检测需要公网 SOCKS5 地址。', 422);
+    }
     throw new InputError('未能解析 SOCKS5 代理地址。', 422);
   }
-  if (!candidates.length || candidates.some(({ address }) => !publicAddress(address, local))) {
-    throw new InputError('线上浏览器和代理检测需要公网 SOCKS5 地址。', 422);
-  }
-  const first = candidates.find(({ address }) => isIP(address) === 4) ?? candidates[0];
-  return { ...proxy, host: first.address };
 }
 
 const X_HOSTS = ['x.com', 'twitter.com', 'twimg.com', 't.co', 'arkoselabs.com', 'funcaptcha.com',

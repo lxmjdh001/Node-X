@@ -9,13 +9,15 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const localhost = '127.0.0.1';
 const matrixUserId = '@operator:fixture.test';
 const bridgeBotId = '@twitterbot:fixture.test';
 const xUserId = '1234';
 const otherXUserId = '9876';
+const selfConfiguredXUserId = '4567';
+const publicMatrixOrigin = 'https://matrix.fixture.test';
 const entry = fileURLToPath(new URL('../../server/index.ts', import.meta.url));
 
 async function listen(server) {
@@ -52,7 +54,34 @@ function bridgedRoom(receiver, body) {
   };
 }
 
-test('the workbench connects to the matching mautrix login, restores synchronization, and disconnects', {
+async function loopbackMatrixPreload(directory, matrixUrl) {
+  const preload = join(directory, 'matrix-fixture.mjs');
+  await writeFile(preload, `
+import dns from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
+import { syncBuiltinESMExports } from 'node:module';
+
+const origin = new URL(${JSON.stringify(publicMatrixOrigin)});
+const lookup = dns.lookup.bind(dns);
+const request = https.request.bind(https);
+dns.lookup = (hostname, options) => hostname === origin.hostname
+  ? Promise.resolve([{ address: '1.1.1.1', family: 4 }])
+  : lookup(hostname, options);
+https.request = (target, options, callback) => {
+  if (!(target instanceof URL) || target.origin !== origin.origin) return request(target, options, callback);
+  const loopback = new URL(target.pathname + target.search, ${JSON.stringify(matrixUrl)});
+  return http.request(loopback, {
+    ...options, lookup: undefined,
+    headers: { ...options.headers, 'x-fixture-public-matrix': '1' },
+  }, callback);
+};
+syncBuiltinESMExports();
+`);
+  return pathToFileURL(preload).href;
+}
+
+test('the workbench configures, connects, restores, and disconnects managed mautrix logins', {
   timeout: 35_000,
 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'nodex-managed-dm-'));
@@ -65,6 +94,7 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
     }
   });
   const dataDirectory = join(directory, 'data');
+  const databasePath = join(dataDirectory, 'nodex.sqlite');
   const configs = join(dataDirectory, 'dm-matrix');
   await Promise.all([mkdir(join(directory, 'dist')), mkdir(configs, { recursive: true, mode: 0o700 })]);
   await writeFile(join(directory, 'dist', 'index.html'), '<!doctype html><title>Node X fixture</title>');
@@ -72,6 +102,7 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
   const { promise: firstSync, resolve: releaseFirstSync } = Promise.withResolvers();
   const syncRequests = [];
   let bridgeChecks = 0;
+  let selfLoginId = selfConfiguredXUserId;
   const violations = [];
   const matrix = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://matrix.fixture');
@@ -86,17 +117,30 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
     if (url.pathname === '/_matrix/provision/v3/whoami') {
       bridgeChecks++;
       if (url.searchParams.get('user_id') !== matrixUserId) violations.push('incorrect Matrix user for mautrix');
-      return reply({ bridge_bot: bridgeBotId, logins: [{ id: xUserId, state: { state_event: 'CONNECTED' } }] });
+      return reply({
+        bridge_bot: bridgeBotId,
+        network: { network_id: 'twitter' },
+        logins: [
+          { id: xUserId, profile: { username: 'matched' }, state: { state_event: 'CONNECTED' } },
+          { id: selfLoginId, profile: { username: 'selfmanaged' }, state: { state_event: 'CONNECTED' } },
+        ],
+      });
     }
     if (url.pathname === '/_matrix/client/v3/sync') {
       const number = syncRequests.push(url.searchParams);
       await firstSync;
+      const selfInitialSync = req.headers['x-fixture-public-matrix'] === '1' && !url.searchParams.has('since');
       return reply({
         next_batch: 'cursor-' + number,
-        rooms: { join: number === 1 ? {
-          '!matched:fixture.test': bridgedRoom(xUserId, 'Fixture private message'),
-          '!unrelated:fixture.test': bridgedRoom(otherXUserId, 'Unrelated private message'),
-        } : {} },
+        rooms: { join: {
+          ...(number === 1 && {
+            '!matched:fixture.test': bridgedRoom(xUserId, 'Fixture private message'),
+            '!unrelated:fixture.test': bridgedRoom(otherXUserId, 'Unrelated private message'),
+          }),
+          ...(selfInitialSync && {
+            '!selfmanaged:fixture.test': bridgedRoom(selfConfiguredXUserId, 'Self-managed private message'),
+          }),
+        } },
       });
     }
     violations.push('unexpected Matrix route: ' + url.pathname);
@@ -105,6 +149,7 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
   });
   const matrixUrl = 'http://' + localhost + ':' + await listen(matrix);
   cleanUpServices = () => close(matrix);
+  const preload = await loopbackMatrixPreload(directory, matrixUrl);
   const reserved = [createServer(), createServer()];
   const [port, operatorPort] = await Promise.all(reserved.map(listen));
   await Promise.all(reserved.map(close));
@@ -112,7 +157,7 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
   let nodeX;
   let logs = '';
   async function startNodeX() {
-    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), entry], {
+    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--import', preload, entry], {
       cwd: directory,
       env: { NODEX_DATA_DIR: dataDirectory, PORT: String(port), NODEX_OPERATOR_PORT: String(operatorPort) },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -147,7 +192,7 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
 
   // Seed a test login code and authenticate through the same HTTP endpoints as the workbench.
   const code = 'NX-' + randomBytes(20).toString('base64url');
-  const db = new DatabaseSync(join(dataDirectory, 'nodex.sqlite'));
+  const db = new DatabaseSync(databasePath);
   try {
     db.exec('PRAGMA busy_timeout = 1000');
     const now = Date.now();
@@ -163,23 +208,26 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
   const cookie = login.headers.getSetCookie()[0]?.split(';')[0];
   assert.match(cookie ?? '', /^nodex_session=/);
 
-  async function api(path, body) {
+  async function api(path, body, expectedStatus) {
     const response = await fetch(base + '/api' + path, {
       headers: { cookie, 'content-type': 'application/json' },
       ...(body !== undefined ? { method: 'POST', body: JSON.stringify(body) } : {}),
     });
     const result = await response.text();
-    assert.doesNotMatch(result, /"(?:ticket|pairTicket|token|tokenHash|matrixAccessToken|bridgeProvisioningUrl)"\s*:/i);
+    assert.doesNotMatch(result, /"(?:ticket|pairTicket|token|tokenHash|matrixAccessToken|matrixUrl|bridgeProvisioningUrl|sealedConfig)"\s*:/i);
     assert.ok(!result.includes(matrixAccessToken), 'Matrix credential was returned to the workbench');
-    assert.ok(response.ok, path + ': ' + response.status + ' ' + result);
+    if (expectedStatus === undefined) assert.ok(response.ok, path + ': ' + response.status + ' ' + result);
+    else assert.equal(response.status, expectedStatus, path + ': ' + result);
     return JSON.parse(result);
   }
   const inbox = () => api('/dm/inbox');
   await api('/accounts', { label: 'Matched', username: 'matched' });
   await api('/accounts', { label: 'Unmatched', username: 'unmatched' });
+  await api('/accounts', { label: 'Self-managed', username: 'selfmanaged' });
   const { accounts } = await inbox();
   const matched = accounts.find(account => account.username === 'matched').id;
   const unmatched = accounts.find(account => account.username === 'unmatched').id;
+  const selfManaged = accounts.find(account => account.username === 'selfmanaged').id;
   const connectPath = id => '/dm/accounts/' + id + '/connect';
   const disconnectPath = id => '/dm/accounts/' + id + '/disconnect';
   const connect = (id, body) => api(connectPath(id), body);
@@ -239,6 +287,46 @@ test('the workbench connects to the matching mautrix login, restores synchroniza
   assert.equal((await inbox()).accounts.find(account => account.id === unmatched).connected, false);
   await connect(matched, {});
   await waitForStatus(matched, 'online', true);
+
+  const configPath = connectPath(selfManaged) + '-config';
+  const publicConfig = {
+    username: 'selfmanaged',
+    matrixUrl: publicMatrixOrigin,
+    bridgeProvisioningUrl: publicMatrixOrigin + '/_matrix/provision',
+    matrixAccessToken,
+  };
+  function savedConfig() {
+    const reader = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      return reader.prepare('SELECT xUserId, sealedConfig FROM dm_bridge_configs WHERE accountId = ?').get(selfManaged);
+    } finally {
+      reader.close();
+    }
+  }
+  await waitForStatus(selfManaged, 'unconfigured', false);
+  const unauthorized = await fetch(base + '/api' + configPath, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(publicConfig),
+  });
+  assert.equal(unauthorized.status, 401, await unauthorized.text());
+  await api(configPath, { ...publicConfig, matrixUrl }, 422);
+  assert.equal(savedConfig(), undefined);
+  await api(configPath, publicConfig);
+  await waitForStatus(selfManaged, 'online', true);
+  const stored = savedConfig();
+  assert.equal(stored.xUserId, selfConfiguredXUserId);
+  assert.match(stored.sealedConfig, /^[A-Za-z0-9+/]+={0,2}$/);
+  assert.ok(!stored.sealedConfig.includes(matrixAccessToken), 'SQLite stored the cleartext Matrix credential');
+  const selfInbox = await api('/dm/inbox?accountId=' + selfManaged);
+  assert.deepEqual(selfInbox.conversations.map(({ preview }) => preview), ['Self-managed private message']);
+
+  await api(disconnectPath(selfManaged), {});
+  await waitForStatus(selfManaged, 'idle', false);
+  await api(configPath, { ...publicConfig, username: 'otheruser' }, 409);
+  assert.deepEqual(savedConfig(), stored);
+  selfLoginId = otherXUserId;
+  await api(configPath, publicConfig, 409);
+  assert.deepEqual(savedConfig(), stored);
+
   assert.ok(bridgeChecks >= 3);
   assert.deepEqual(violations, []);
   assert.ok(!logs.includes(matrixAccessToken), 'Matrix credential was written to server logs');
