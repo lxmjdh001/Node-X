@@ -1,6 +1,6 @@
 # Node X 的 mautrix 私信连接器
 
-连接器把已自建的 `mautrix-twitter` 与 Matrix 中的私信同步到 Node X 收件箱。每个 X 账号运行一个连接器进程，共用一个 Node X 工作空间。浏览器登录和这个配对流程各自由对应服务管理。
+连接器把已自建的 `mautrix-twitter` 与 Matrix 中的私信同步到 Node X 收件箱。每个 X 账号使用独立的连接和同步状态。Chrome 与 mautrix 各自管理 X 登录会话。
 
 ## 准备 Matrix 与 mautrix
 
@@ -9,9 +9,27 @@
 3. 在桥接配置中启用 `matrix.message_status_events: true`。Node X 在桥接确认后才标记「已发送」。Matrix 自身收到消息只表示已受理。
 4. 此连接器读写 Matrix 侧的普通私有房间，并在日志中提示跳过 Matrix 端到端加密房间。X Chat 侧的加密由 `mautrix-twitter` 处理。现阶段同步近期文本和后续新增文本。附件、撤回和编辑需要后续支持。
 
-## 绑定 Node X
+## 在窗口管理连接
 
-在 Node X「私信工作室」中选择账号并生成配对码。在运行连接器的主机上创建仅当前用户可读写的 JSON 配置文件，如 `~/.config/nodex/x-account.json`。保存前用 `umask 077` 或 `chmod 600` 设置权限。以下均为示意值。
+管理员在对应工作空间的 `dm-matrix` 子目录放置 `<Node X 账号 UUID>.json`。管理员工作空间的根目录是 `NODEX_DATA_DIR`，客户工作空间使用 `NODEX_DATA_DIR/customers/<工作空间 UUID>`。JSON 文件属于 Node X 服务用户，权限为 `0600`。每个账号使用自己的配置文件。账号 UUID 是 Node X 内部编号，`xUserId` 是 mautrix 的 X 数字用户编号。
+
+```json
+{
+  "matrixUrl": "https://matrix.example.com",
+  "matrixAccessToken": "该专用 Matrix 用户的 access token",
+  "bridgeBotId": "@twitterbot:matrix.example.com",
+  "bridgeProvisioningUrl": "https://bridge.example.com/_matrix/provision",
+  "xUserId": "123456789"
+}
+```
+
+使用可访问的 mautrix provisioning 地址，并启用 `provisioning.allow_matrix_auth`。部署时配置 provisioning 共享密钥，Node X 使用专用 Matrix 用户凭据验证账号归属。可以从桥接内部访问该接口，无需向公网开放。上游配置和返回字段参见 [mautrix provisioning 接口](https://github.com/mautrix/go/blob/ae411b495f84/bridgev2/matrix/provisioning.go)。
+
+客户在「窗口管理」对应账号点击「连接私信」。Node X 检查桥接中的 X 登录和账号编号，自动建立连接并在首次同步成功后显示在线。再次启动 Node X 时，已有托管连接会尝试从上次游标恢复。断开连接会停止同步并保留历史。服务受到强制终止后若留下 `.state.json.lock`，请确认上一服务进程已结束再移除锁文件。
+
+## 独立运行连接器
+
+对于独立部署，兼容已登录工作空间的 `POST /api/dm/accounts/<账号 UUID>/connect-ticket` 接口。用其返回的 `ticket` 创建仅当前用户可读写的配置文件，如 `~/.config/nodex/x-account.json`。保存前用 `umask 077` 或 `chmod 600` 设置权限。以下均为示意值。
 
 ```json
 {
@@ -39,4 +57,4 @@ node scripts/dm-matrix/connector.mjs "$HOME/.config/nodex/x-account.json"
 
 有连续历史需求时，请查看 Matrix 同步结果。首次运行读取每个房间最近的文本事件。后续使用游标读取增量。若 Matrix 返回的时间线存在间隔，连接器会记录提示并同步已返回的近期消息。发送时若 X 桥接未给出有效确认，Node X 会显示「结果待确认」，需要人工查看 X 会话。
 
-本地验证运行 `node --test scripts/dm-matrix/connector.test.mjs`。测试使用临时目录与本机模拟服务。
+本地验证运行 `node --test scripts/dm-matrix/*.test.mjs`。测试使用临时目录与本机模拟服务。

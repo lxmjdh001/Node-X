@@ -302,8 +302,6 @@
 .dm-connect-body { display: grid; gap: 11px; }
 .dm-connect-body[hidden] { display: none; }
 .dm-connect-body > p { margin: 0; }
-.dm-ticket { display: flex; align-items: end; gap: 8px; }
-.dm-ticket .field { flex: 1; min-width: 0; }
 .dm-history-button { margin: 0 auto 12px; display: flex; }
 
 .dm-mobile-account, .dm-workspace .dm-mobile-connect, .dm-workspace .dm-back { display: none; }

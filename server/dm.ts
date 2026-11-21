@@ -1,9 +1,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { Router, type Request } from 'express';
 import { z } from 'zod';
+import { ProtocolError, runConnector } from '../scripts/dm-matrix/connector.mjs';
 import { sessionHasAccess, workspaceAuthorized } from './auth.js';
 import { InputError, requireFound } from './errors.js';
-import { reveal, row, rows, runInWorkspace, seal, workspaceDb, workspaceId, write } from './store.js';
+import { customerWorkspaceIds, reveal, row, rows, runInWorkspace, seal, workspaceDb, workspaceDirectory, workspaceId, write } from './store.js';
 
 export const dm = Router();
 export const dmConnector = Router();
@@ -55,6 +58,14 @@ type Ticket = {
 const tickets = new Map<string, Ticket>();
 type Account = { id: string; label: string; username: string; xUserId: string | null };
 type Connection = { accountId: string; tokenHash: string; lastSeenAt: string; lastSyncAt: string | null };
+type ManagedConnection = {
+  status: 'starting' | 'syncing' | 'online' | 'offline' | 'failed';
+  message?: string;
+  controller: AbortController;
+  done?: Promise<void>;
+};
+const managedConnections = new Map<string, ManagedConnection>();
+let managedClosing = false;
 type Conversation = {
   id: string;
   accountId: string;
@@ -111,6 +122,121 @@ function clearTickets(accountId: string, workspace: string | undefined) {
   for (const [key, ticket] of tickets) {
     if (ticket.expires <= Date.now() || (ticket.workspace === workspace && ticket.accountId === accountId)) tickets.delete(key);
   }
+}
+
+function bindAccount(accountId: string, workspace: string | undefined, xUserId: string | undefined, managed = false) {
+  const token = `${workspace ?? 'owner'}.${randomBytes(32).toString('base64url')}`;
+  return runInWorkspace(workspace, () => transaction(() => {
+    const current = account(accountId);
+    const last = row<{ xUserId: string | null }>('SELECT xUserId FROM dm_connections WHERE accountId = ?', accountId);
+    const expected = current.xUserId ?? last?.xUserId;
+    if (expected && xUserId && expected !== xUserId) {
+      throw new InputError('私信桥接的 X 账号与所选账号不一致。', 409);
+    }
+    if (managed && last) throw new InputError('此账号已有私信连接，请先断开原连接，再重新连接。', 409);
+    cancelReplies(accountId);
+    write(`
+      INSERT INTO dm_connections (accountId, tokenHash, xUserId, lastSeenAt)
+      VALUES (?, ?, ?, ?) ON CONFLICT(accountId) DO UPDATE SET
+      tokenHash = excluded.tokenHash, xUserId = excluded.xUserId, lastSeenAt = excluded.lastSeenAt
+    `, accountId, tokenHash(token), expected ?? xUserId ?? null, managed ? before(onlineMs) : now());
+    return { token, account: { ...current, xUserId: expected ?? xUserId ?? null } };
+  }));
+}
+
+function managedConfig(accountId: string) {
+  return join(workspaceDirectory(), 'dm-matrix', `${accountId}.json`);
+}
+
+function connectionStatus(accountId: string) {
+  const connection = row<Connection>('SELECT * FROM dm_connections WHERE accountId = ?', accountId);
+  const paired = Boolean(connection);
+  const config = managedConfig(accountId);
+  const managed = managedConnections.get(config);
+  const online = connection && connection.lastSeenAt > before(onlineMs);
+  if (managed && !managed.controller.signal.aborted) {
+    if (managed.status === 'online' && !online) return { status: 'offline', paired };
+    return { status: managed.status, message: managed.message, paired };
+  }
+  if (online) return { status: 'online', paired };
+  if (paired) return { status: 'offline', paired };
+  return existsSync(config) ? { status: 'idle', paired } : {
+    status: 'unconfigured', paired, message: '此账号还未配置私信桥接，请联系管理员完成配置。',
+  };
+}
+
+function startManaged(accountId: string, authorize?: () => boolean) {
+  const config = managedConfig(accountId);
+  if (managedClosing || managedConnections.get(config)?.done || !existsSync(config)) return;
+  const workspace = workspaceId();
+  const task: ManagedConnection = { status: 'starting', controller: new AbortController() };
+  managedConnections.set(config, task);
+  let pairedHash: string | undefined;
+  const markOffline = () => {
+    const hash = pairedHash;
+    if (!hash) return;
+    runInWorkspace(workspace, () => {
+      write('UPDATE dm_connections SET lastSeenAt = ? WHERE tokenHash = ?', before(onlineMs), hash);
+    });
+  };
+  task.done = runConnector(config, {
+    signal: task.controller.signal,
+    log: () => {},
+    warn: () => {},
+    managed: {
+      nodeXUrl: process.env.NODEX_PUBLIC_ORIGIN?.trim() || `http://127.0.0.1:${process.env.PORT || 4173}`,
+      hasToken: (token, xUserId) => workspaceAuthorized(workspace) && Boolean(runInWorkspace(workspace, () => row(`
+        SELECT 1 FROM dm_connections d JOIN accounts a ON a.id = d.accountId
+        WHERE d.accountId = ? AND d.tokenHash = ? AND COALESCE(a.xUserId, d.xUserId) = ?
+      `, accountId, tokenHash(token), xUserId))),
+      pair: xUserId => {
+        if (!authorize?.() || !workspaceAuthorized(workspace)) throw new InputError('请回到窗口管理重新连接此账号。', 401);
+        clearTickets(accountId, workspace);
+        return bindAccount(accountId, workspace, xUserId, true);
+      },
+      onPaired: token => {
+        pairedHash = tokenHash(token);
+        task.status = 'syncing';
+        markOffline();
+      },
+      onSync: () => {
+        task.status = 'online';
+        task.message = undefined;
+      },
+      onRetry: message => {
+        if (task.status !== 'offline') markOffline();
+        task.status = 'offline';
+        task.message = message;
+      },
+    },
+  }).catch(error => {
+    if (task.controller.signal.aborted) return;
+    task.status = 'failed';
+    task.message = error instanceof ProtocolError || error instanceof InputError
+      ? error.message : '私信连接器启动失败，请管理员检查部署与配置。';
+  }).finally(() => {
+    markOffline();
+    task.done = undefined;
+    if (task.controller.signal.aborted) managedConnections.delete(config);
+  });
+}
+
+export function restoreManagedDm() {
+  for (const workspace of [undefined, ...customerWorkspaceIds()]) {
+    runInWorkspace(workspace, () => {
+      if (!existsSync(join(workspaceDirectory(), 'dm-matrix')) || !workspaceAuthorized(workspace)) return;
+      for (const { accountId } of rows<{ accountId: string }>('SELECT accountId FROM dm_connections')) {
+        if (existsSync(`${managedConfig(accountId)}.state.json`)) startManaged(accountId);
+      }
+    });
+  }
+}
+
+export async function shutdownManagedDm() {
+  managedClosing = true;
+  const tasks = [...managedConnections.values()];
+  for (const task of tasks) task.controller.abort();
+  await Promise.allSettled(tasks.map(task => task.done));
 }
 
 function device<T>(req: Request, work: (connection: Connection) => T): T {
@@ -245,6 +371,9 @@ dm.post('/dm/conversations/:id/replies', (req, res) => {
 
 dm.post('/dm/accounts/:id/connect-ticket', (req, res) => {
   const boundAccount = account(id.parse(req.params.id));
+  if (managedConnections.get(managedConfig(boundAccount.id))?.done) {
+    throw new InputError('此账号的自动私信连接已启动。请先断开，再使用独立连接器。', 409);
+  }
   const workspace = workspaceId();
   clearTickets(boundAccount.id, workspace);
   if (tickets.size >= 500) throw new InputError('连接请求过多，请稍后再试。', 429);
@@ -253,13 +382,29 @@ dm.post('/dm/accounts/:id/connect-ticket', (req, res) => {
   res.json({ ticket, expiresAt: new Date(Date.now() + ticketMs).toISOString() });
 });
 
-dm.post('/dm/accounts/:id/disconnect', (req, res) => {
+dm.get('/dm/accounts/:id/connect', (req, res) => {
+  const { id: accountId } = account(id.parse(req.params.id));
+  res.json(connectionStatus(accountId));
+});
+
+dm.post('/dm/accounts/:id/connect', (req, res) => {
+  const { id: accountId } = account(id.parse(req.params.id));
+  if (connectionStatus(accountId).status !== 'online') startManaged(accountId, sessionHasAccess(req));
+  res.json(connectionStatus(accountId));
+});
+
+dm.post('/dm/accounts/:id/disconnect', async (req, res) => {
   const boundAccount = account(id.parse(req.params.id));
+  const config = managedConfig(boundAccount.id);
+  const managed = managedConnections.get(config);
+  managed?.controller.abort();
+  if (!managed?.done) managedConnections.delete(config);
   clearTickets(boundAccount.id, workspaceId());
   transaction(() => {
     cancelReplies(boundAccount.id);
     write('DELETE FROM dm_connections WHERE accountId = ?', boundAccount.id);
   });
+  await managed?.done;
   res.json({ ok: true });
 });
 
@@ -273,23 +418,10 @@ dmConnector.post('/pair', (req, res) => {
   if (!entry || entry.expires <= Date.now() || !entry.authorize() || !workspaceAuthorized(entry.workspace)) {
     throw new InputError('连接凭证已失效，请回到工作台重新生成。', 401);
   }
-  const token = `${entry.workspace ?? 'owner'}.${randomBytes(32).toString('base64url')}`;
-  const boundAccount = runInWorkspace(entry.workspace, () => transaction(() => {
-    const current = account(entry.accountId);
-    const last = row<{ xUserId: string | null }>('SELECT xUserId FROM dm_connections WHERE accountId = ?', current.id);
-    const expected = current.xUserId ?? last?.xUserId;
-    if (expected && xUserId && expected !== xUserId) {
-      throw new InputError('私信桥接的 X 账号与所选账号不一致。', 409);
-    }
-    cancelReplies(entry.accountId);
-    write(`
-      INSERT INTO dm_connections (accountId, tokenHash, xUserId, lastSeenAt)
-      VALUES (?, ?, ?, ?) ON CONFLICT(accountId) DO UPDATE SET
-      tokenHash = excluded.tokenHash, xUserId = excluded.xUserId, lastSeenAt = excluded.lastSeenAt
-    `, current.id, tokenHash(token), expected ?? xUserId ?? null, now());
-    return { ...current, xUserId: expected ?? xUserId ?? null };
-  }));
-  res.json({ token, account: boundAccount });
+  if (runInWorkspace(entry.workspace, () => managedConnections.get(managedConfig(entry.accountId))?.done)) {
+    throw new InputError('此账号的自动私信连接已启动。请先断开，再使用独立连接器。', 409);
+  }
+  res.json(bindAccount(entry.accountId, entry.workspace, xUserId));
 });
 
 dmConnector.post('/events', (req, res) => {

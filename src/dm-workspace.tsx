@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Archive, ArrowLeft, Check, Copy, Inbox, Link2, RefreshCw, Search, Send, Tag, Users } from "lucide-react";
+import { Archive, ArrowLeft, Check, Inbox, Link2, RefreshCw, Search, Send, Tag, Users } from "lucide-react";
 import { Button, Dialog, Field, Icon, IconButton } from "./ui";
 import "./dm-workspace.css";
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Account = { id: string; label: string; username: string; connected: boolean; lastSyncAt: string | null };
+type ConnectAccount = Pick<Account, "id" | "label"> & Partial<Pick<Account, "connected">>;
+type ConnectionStatus = {
+  status: "unconfigured" | "idle" | "starting" | "syncing" | "online" | "offline" | "failed";
+  message?: string;
+  paired: boolean;
+};
 type Conversation = {
   id: string;
   accountId: string;
@@ -31,6 +37,19 @@ const emptyInbox: InboxData = { accounts: [], conversations: [] };
 const shortDate = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" });
 const sendStatus = { queued: "等待连接器发送", sent: "已发送", failed: "发送失败", uncertain: "结果待确认" };
+const connectionMessages: Record<ConnectionStatus["status"], string> = {
+  unconfigured: "请联系管理员为此账号配置私信桥接。",
+  idle: "已找到此账号的私信桥接。连接后可在私信工作室查看消息。",
+  starting: "正在启动私信连接。",
+  syncing: "已连接桥接，正在等待首次同步。",
+  online: "已连接，可在私信工作室查看和回复消息。",
+  offline: "私信连接已离线，可尝试重新连接。",
+  failed: "连接失败，请重试。",
+};
+
+function connecting(status?: ConnectionStatus["status"]) {
+  return status === "starting" || status === "syncing";
+}
 
 function time(value: string, format = shortDate) {
   const date = new Date(value);
@@ -460,78 +479,147 @@ function DmThread({ conversation, account, request, savedDraft, back, reload, ch
   );
 }
 
-function DmConnect({ accounts, initialAccount, request, close }: {
-  accounts: Account[]; initialAccount?: string; request: Request; close: () => void;
+export function DmConnect({ accounts, initialAccount, request, close, openInbox, autoStart = false }: {
+  accounts: ConnectAccount[];
+  initialAccount?: string;
+  request: Request;
+  close: () => void;
+  openInbox?: (accountId: string) => void;
+  autoStart?: boolean;
 }) {
   const [accountId, setAccountId] = useState(initialAccount ?? accounts.find(account => !account.connected)?.id ?? accounts[0]?.id ?? "");
-  const [ticket, setTicket] = useState<{ ticket: string; expiresAt: string }>();
+  const [connection, setConnection] = useState<ConnectionStatus>();
+  const [checkAttempt, setCheckAttempt] = useState(0);
+  const [checkPaused, setCheckPaused] = useState(false);
   const [busy, setBusy] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
-  const [feedback, setFeedback] = useState<{ text: string; error?: boolean }>();
+  const [error, setError] = useState("");
+  const startOnFirstCheck = useRef(autoStart && accounts.length === 1);
   const account = accounts.find(item => item.id === accountId);
-  async function createTicket(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!accountId || busy || disconnecting) return;
+  const status = connection?.status;
+  const pending = connecting(status);
+  const path = `/api/dm/accounts/${accountId}/connect`;
+
+  const startConnection = useCallback(async () => {
     setBusy(true);
-    setTicket(undefined);
-    setFeedback(undefined);
+    setError("");
     try {
-      setTicket(await request<{ ticket: string; expiresAt: string }>(`/api/dm/accounts/${accountId}/connect-ticket`, "POST", {}));
+      const next = await request<ConnectionStatus>(path, "POST", {});
+      setConnection(next);
+      if (connecting(next.status)) setCheckAttempt(attempt => attempt + 1);
     } catch (cause) {
-      setFeedback({ text: (cause as Error).message, error: true });
+      setError((cause as Error).message);
     } finally {
       setBusy(false);
     }
+  }, [path, request]);
+
+  useEffect(() => {
+    if (!accountId || disconnecting) return;
+    let active = true;
+    let timeout: number | undefined;
+    let remainingChecks = 15;
+    setCheckPaused(false);
+    setError("");
+
+    async function checkStatus() {
+      try {
+        const next = await request<ConnectionStatus>(path);
+        if (!active) return;
+        setConnection(next);
+        if (startOnFirstCheck.current) {
+          startOnFirstCheck.current = false;
+          if (next.status === "idle") {
+            await startConnection();
+            return;
+          }
+        }
+        if (!connecting(next.status)) return;
+        if (remainingChecks-- > 0) {
+          timeout = window.setTimeout(() => void checkStatus(), 3000);
+        } else {
+          setCheckPaused(true);
+        }
+      } catch (cause) {
+        if (!active) return;
+        setError((cause as Error).message);
+        setCheckPaused(true);
+      }
+    }
+
+    void checkStatus();
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [accountId, checkAttempt, disconnecting, path, request, startConnection]);
+
+  function connect(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!account || !status || busy || disconnecting || pending || checkPaused || status === "unconfigured" || status === "online") return;
+    void startConnection();
   }
+
   async function disconnect() {
+    if (!account || busy) return;
     setBusy(true);
-    setFeedback(undefined);
+    setError("");
     try {
       await request(`/api/dm/accounts/${accountId}/disconnect`, "POST", {});
       close();
     } catch (cause) {
-      setFeedback({ text: (cause as Error).message, error: true });
+      setError((cause as Error).message);
     } finally {
       setBusy(false);
     }
   }
+
+  const statusMessage = account
+    ? connection?.message || (status ? connectionMessages[status] : "正在检查私信连接状态…")
+    : "请选择要连接的 X 账号。";
+
   return (
     <Dialog title={disconnecting ? "断开私信连接" : "连接 X 私信"}
-      description={disconnecting ? `停止「${account?.label}」的私信同步和发送，保留已同步的记录。` : "将这个 X 账号的 mautrix 私信连接器配对到 Node X。"}
+      description={disconnecting ? `停止「${account?.label}」的私信同步和发送，保留已同步的记录。` : undefined}
       onClose={() => !busy && close()}>
-      <form onSubmit={createTicket}>
+      <form onSubmit={connect}>
         <div className="dialog-body dm-connect-body" hidden={disconnecting}>
-          <Field label="X 账号">
-            <select value={accountId} onChange={event => { setAccountId(event.target.value); setTicket(undefined); setFeedback(undefined); }} disabled={busy}>
-              {accounts.map(account => <option value={account.id} key={account.id}>{account.label}{account.connected ? "（已连接）" : ""}</option>)}
-            </select>
-          </Field>
-          <p className="subtle">先在 mautrix 中连接对应的 X 账号，再把一次性配对码填入 Node X 私信连接器的配置。</p>
-          {ticket && (
-            <div className="dm-ticket">
-              <Field label="一次性配对码" hint={`${time(ticket.expiresAt, clock)} 前有效`}>
-                <input readOnly value={ticket.ticket} onFocus={event => event.currentTarget.select()} />
-              </Field>
-              <IconButton label="复制配对码" icon={Copy} onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(ticket.ticket);
-                  setFeedback({ text: "已复制配对码。" });
-                } catch {
-                  setFeedback({ text: "复制失败，可选中配对码手动复制。", error: true });
-                }
-              }} />
-            </div>
+          {accounts.length === 1 && account ? (
+            <Field label="X 账号"><input readOnly value={account.label} /></Field>
+          ) : (
+            <Field label="X 账号">
+              <select value={account ? accountId : ""} disabled={busy} onChange={event => {
+                setAccountId(event.target.value);
+                setConnection(undefined);
+                setCheckPaused(false);
+                setError("");
+              }}>
+                {!account && <option value="">选择 X 账号</option>}
+                {accounts.map(account => <option value={account.id} key={account.id}>{account.label}{account.connected ? "（已连接）" : ""}</option>)}
+              </select>
+            </Field>
           )}
-          {feedback && <p className={feedback.error ? "form-error" : "subtle"} role={feedback.error ? "alert" : "status"}>{feedback.text}</p>}
+          {error || status === "failed"
+            ? <p className="form-error" role="alert">{error || statusMessage}</p>
+            : <p className="subtle" role="status">{statusMessage}</p>}
+          {checkPaused && pending && !error && <p className="subtle">后台仍在连接。可以关闭弹窗，稍后回来查看，或立即刷新状态。</p>}
         </div>
-        {disconnecting && feedback && <p className="form-error dialog-body" role="alert">{feedback.text}</p>}
+        {disconnecting && error && <p className="form-error dialog-body" role="alert">{error}</p>}
         <div className="dialog-footer">
           <Button type="button" disabled={busy} onClick={() => disconnecting ? setDisconnecting(false) : close()}>{disconnecting ? "取消" : "关闭"}</Button>
           {disconnecting ? <Button type="button" variant="danger" busy={busy} onClick={() => void disconnect()}>断开连接</Button> : (
             <div>
-              {(account?.connected || account?.lastSyncAt) && <Button type="button" variant="ghost" disabled={busy}
-                onClick={() => { setFeedback(undefined); setDisconnecting(true); }}>断开连接</Button>}
-              <Button type="submit" variant="primary" icon={Link2} busy={busy} disabled={!accountId}>{ticket ? "重新生成" : "生成配对码"}</Button>
+              {account && connection?.paired && <Button type="button" variant="ghost" disabled={busy}
+                onClick={() => { setError(""); setDisconnecting(true); }}>断开连接</Button>}
+              {account && checkPaused ? (
+                <Button type="button" variant="primary" icon={RefreshCw} onClick={() => setCheckAttempt(attempt => attempt + 1)}>刷新状态</Button>
+              ) : account && status === "online" && openInbox ? (
+                <Button type="button" variant="primary" icon={Inbox} onClick={() => openInbox(accountId)}>打开私信</Button>
+              ) : account && status !== "unconfigured" && status !== "online" ? (
+                <Button type="submit" variant="primary" icon={Link2} busy={busy || pending || !status}>
+                  {!status ? "检查连接" : pending || busy ? "正在连接" : status === "failed" || status === "offline" ? "重新连接" : "连接私信"}
+                </Button>
+              ) : null}
             </div>
           )}
         </div>

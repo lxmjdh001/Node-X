@@ -58,7 +58,7 @@ import {
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
 import { assignmentModes, MAX_BULK_DELETE_IDS, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, postOutputLanguages, type AssignmentMode, type PendingPost, type PostLayout, type PostOutputLanguage } from "./post-queue";
-import { DmWorkspace } from "./dm-workspace";
+import { DmConnect, DmWorkspace } from "./dm-workspace";
 import { ModelPage } from "./models-page";
 import { distributionPublishingModes, MAX_BULK_PUBLISH, publishSnapshot, type AssignmentResult, type DistributionPublishingMode, type PublishingMethod } from "./publishing";
 import { Icon, Button, IconButton, Dialog, Field } from "./ui";
@@ -314,6 +314,8 @@ function App({
   const [windowCreator, setWindowCreator] = useState<{
     account?: Account;
   } | null>(null);
+  const [dmConnectId, setDmConnectId] = useState("");
+  const dmConnectTrigger = useRef<HTMLButtonElement>(null);
   const [importing, setImporting] = useState(false);
   const [camoufoxOpen, setCamoufoxOpen] = useState(false);
   const [camoufox, setCamoufox] = useState<CamoufoxData | null>(null);
@@ -651,6 +653,7 @@ function App({
   const readyProxy = data.proxies.filter((p) => p.status === "ok").length;
   const connected = data.accounts.filter((a) => a.xConnected).length;
   const working = data.profiles.filter((p) => p.running).length;
+  const dmConnectAccount = data.accounts.find((account) => account.id === dmConnectId);
   const windowRows = data.accounts.map((account) => {
     const profile = data.profiles.find((item) => item.accountId === account.id);
     const proxy = data.proxies.find((item) => item.id === profile?.proxyId);
@@ -678,7 +681,7 @@ function App({
     models: ["模型列表", "添加服务商的 API Key，并分别选择写作和发布审核模型。"],
     settings: ["系统设置", "查看服务与 X 接入状态。"],
   }[page];
-  function WindowTable({ preview = false }: { preview?: boolean }) {
+  function renderWindowTable(preview = false) {
     const list = preview
       ? windowRows.filter(({ profile }) => profile).slice(0, 5)
       : visibleWindows;
@@ -830,6 +833,12 @@ function App({
                       )}
                       {!preview && (
                         <>
+                          <Button icon={Link2} onClick={(event) => {
+                            dmConnectTrigger.current = event.currentTarget;
+                            setDmConnectId(account.id);
+                          }}>
+                            连接私信
+                          </Button>
                           <Button icon={MessageSquare} onClick={() => go("messages", account.id)}>
                             管理私信
                           </Button>
@@ -1238,7 +1247,7 @@ function App({
                           <Icon icon={ArrowRight} size={15} />
                         </button>
                       </div>
-                      <WindowTable preview />
+                      {renderWindowTable(true)}
                     </section>
                     <section className="panel checklist">
                       <div className="panel-heading">
@@ -1582,7 +1591,7 @@ function App({
                         placeholder="搜索窗口、账号或代理"
                       />
                     </div>
-                    <WindowTable />
+                    {renderWindowTable()}
                     <div className="table-footer">
                       共 {visibleWindows.length} 项
                       {!clientLauncher && <span>{working} 个窗口运行中</span>}
@@ -2070,6 +2079,14 @@ function App({
           }}
         />
       )}
+      {dmConnectAccount && <DmConnect key={dmConnectAccount.id} accounts={[dmConnectAccount]} request={request} autoStart
+        close={() => {
+          setDmConnectId("");
+          requestAnimationFrame(() => dmConnectTrigger.current?.focus());
+        }} openInbox={(accountId) => {
+          setDmConnectId("");
+          go("messages", accountId);
+        }} />}
       {importing && (
         <ImportDialog
           onClose={() => setImporting(false)}

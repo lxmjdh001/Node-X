@@ -10,7 +10,7 @@ import { macChromeLauncher, reapBrowsers, shutdownBrowsers } from './browser.js'
 import { camoufox } from './camoufox-routes.js';
 import { ContentError } from './content.js';
 import { editor } from './editor.js';
-import { dm, dmConnector } from './dm.js';
+import { dm, dmConnector, restoreManagedDm, shutdownManagedDm } from './dm.js';
 import { InputError } from './errors.js';
 import { imports } from './imports.js';
 import { modelRoutes } from './model-routes.js';
@@ -205,6 +205,7 @@ await Promise.all([
     operatorServer.listen(operatorPort, '127.0.0.1', done);
   }),
 ]);
+restoreManagedDm();
 recoverPublishQueue();
 runPublishQueue();
 queue = setInterval(() => {
@@ -223,7 +224,7 @@ async function shutdown() {
   const drained = [server, operatorServer].map((service) => new Promise<void>((done) => service.close(() => done())));
   const watchdog = setTimeout(() => process.exit(1), 15_000);
   watchdog.unref();
-  await Promise.allSettled([closePreview?.(), shutdownBrowsers(), ...drained]);
+  await Promise.allSettled([closePreview?.(), shutdownBrowsers(), shutdownManagedDm(), ...drained]);
   await waitForPublisher();
   closeDatabases();
   clearTimeout(watchdog);

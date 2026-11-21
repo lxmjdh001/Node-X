@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { open, rename, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
 
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MESSAGE_CONFIRMATION_MS = 60_000;
@@ -10,7 +11,7 @@ const NODEX_REPLY_ID = 'org.nodex.reply_id';
 const MATRIX = '/_matrix/client/v3';
 const CONNECTOR = '/api/dm/connector';
 
-class ProtocolError extends Error {
+export class ProtocolError extends Error {
   constructor(message, status) {
     super(message);
     this.status = status;
@@ -55,6 +56,16 @@ function baseUrl(input) {
     throw new ProtocolError('服务地址须使用 HTTPS，并且只包含主机与端口。本机可用 HTTP。');
   }
   return url.origin;
+}
+
+function provisioningUrl(input) {
+  if (typeof input !== 'string') throw new ProtocolError('请配置 mautrix 管理接口。');
+  let url;
+  try { url = new URL(input); } catch { throw new ProtocolError('mautrix 管理接口地址无效。'); }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new ProtocolError('mautrix 管理接口地址不能包含凭据或查询参数。');
+  }
+  return baseUrl(url.origin) + url.pathname.replace(/\/+$/, '');
 }
 
 function matrixId(value, prefix) {
@@ -205,7 +216,7 @@ function filter(config) {
   });
 }
 
-async function connect(config, stateFile, { signal, log = console.log, warn = console.warn } = {}) {
+async function connect(config, stateFile, { signal, managed, log = console.log, warn = console.warn } = {}) {
   const stop = signal ?? new AbortController().signal;
   const mx = (path, opts) => api({ base: config.matrixUrl, path: MATRIX + path, service: 'Matrix',
     token: config.matrixAccessToken, signal: stop, ...opts });
@@ -213,12 +224,27 @@ async function connect(config, stateFile, { signal, log = console.log, warn = co
   if (!matrixId(identity.user_id, '@') || identity.user_id === config.bridgeBotId) {
     throw new ProtocolError('请使用已连接该 X 账号的普通 Matrix 用户凭据。');
   }
+  let bridgeCheckedAt = 0;
+  const checkBridge = async () => {
+    const bridge = await api({ base: config.bridgeProvisioningUrl,
+      path: '/v3/whoami?' + new URLSearchParams({ user_id: identity.user_id }),
+      token: config.matrixAccessToken, service: 'mautrix', signal: stop });
+    if (bridge.bridge_bot !== config.bridgeBotId) throw new ProtocolError('私信桥接机器人与账号配置不符。', 409);
+    const login = Array.isArray(bridge.logins) && bridge.logins.find(item => item?.id === config.xUserId);
+    if (!login || login.state?.state_event === 'BAD_CREDENTIALS') {
+      throw new ProtocolError('请先在 mautrix 登录此 X 账号并按提示完成 X Chat 验证。', 401);
+    }
+    if (login.state?.state_event !== 'CONNECTED') throw new ProtocolError('X 私信桥接尚未就绪，请稍后重试。');
+    bridgeCheckedAt = Date.now();
+  };
+  if (managed) await checkBridge();
   const ownIds = new Set([identity.user_id, config.matrixSelfPuppetId]);
   const scope = createHash('sha256').update(JSON.stringify({ ...config, pairTicket: null, matrixUser: identity.user_id })).digest('hex');
   let state;
   try { state = await readPrivateJson(stateFile); } catch (err) {
     if (err.code !== 'ENOENT') throw err;
   }
+  if (managed && typeof state?.token === 'string' && !managed.hasToken(state.token, config.xUserId)) state = undefined;
   if (state && (state.version !== 1 || state.scope !== scope || typeof state.token !== 'string' || !state.token)) {
     throw new ProtocolError('状态文件属于另一组服务或账号配置。请使用独立配置文件重新配对。');
   }
@@ -227,15 +253,20 @@ async function connect(config, stateFile, { signal, log = console.log, warn = co
     service: 'Node X', token, method: 'POST', body, signal: stop });
 
   if (!state) {
-    if (!config.pairTicket) throw new ProtocolError('首次运行请输入工作台生成的配对码。');
-    const paired = await nodeX('/pair', { ticket: config.pairTicket, xUserId: config.xUserId });
+    if (!managed && !config.pairTicket) throw new ProtocolError('首次运行请输入工作台生成的配对码。');
+    stop.throwIfAborted();
+    const paired = managed ? managed.pair(config.xUserId) :
+      await nodeX('/pair', { ticket: config.pairTicket, xUserId: config.xUserId });
     if (typeof paired.token !== 'string' || !paired.token) throw new ProtocolError('Node X 未返回连接凭据。');
     if (paired.account?.xUserId && paired.account.xUserId !== config.xUserId) {
       throw new ProtocolError('Node X 的 X 用户编号与配置不符。请在工作台撤销该连接后重新配对。');
     }
     state = { version: 1, scope, token: paired.token, since: null, pending: null };
+    managed?.onPaired(state.token);
     await saveState(stateFile, state);
-    log('Node X 账号已配对。可从配置文件删除一次性配对码。');
+    if (!managed) log('Node X 账号已配对。可从配置文件删除一次性配对码。');
+  } else {
+    managed?.onPaired(state.token);
   }
 
   const rooms = new Map();
@@ -320,6 +351,7 @@ async function connect(config, stateFile, { signal, log = console.log, warn = co
       }
     }
     await flush();
+    if (managed && !observed.size) await nodeX('/events', { conversations: [] });
 
     const pending = state.pending;
     if (pending?.phase === 'awaiting') {
@@ -394,8 +426,10 @@ async function connect(config, stateFile, { signal, log = console.log, warn = co
   let backoff = 1000;
   while (!stop.aborted) {
     try {
+      if (managed && Date.now() - bridgeCheckedAt >= 45_000) await checkBridge();
       await flushResult();
       await sync();
+      managed?.onSync();
       await flushResult();
       await claim();
       await flushResult();
@@ -403,7 +437,8 @@ async function connect(config, stateFile, { signal, log = console.log, warn = co
       await delay(500, null, { signal: stop });
     } catch (err) {
       if (stop.aborted) break;
-      if (err.status === 401 || err.status === 403) throw err;
+      if (err.status === 401 || err.status === 403 || (managed && err.status === 409)) throw err;
+      managed?.onRetry(err instanceof ProtocolError ? err.message : '私信同步中断，正在重试。');
       warn(err instanceof ProtocolError ? err.message : '连接器操作失败，稍后继续。');
       await delay(backoff, null, { signal: stop }).catch(() => {});
       backoff = Math.min(backoff * 2, 30_000);
@@ -411,28 +446,37 @@ async function connect(config, stateFile, { signal, log = console.log, warn = co
   }
 }
 
-async function main() {
-  if (process.argv.length !== 3) throw new ProtocolError('用法：node scripts/dm-matrix/connector.mjs /路径/config.json');
-  const configFile = resolve(process.argv[2]);
+export async function runConnector(configFile, options) {
   const stateFile = configFile + '.state.json';
-  const config = readConfig(await readPrivateJson(configFile));
+  const raw = await readPrivateJson(configFile);
+  const managed = options.managed;
+  const config = managed ? {
+    ...readConfig({ ...raw, nodeXUrl: managed.nodeXUrl, pairTicket: null }),
+    bridgeProvisioningUrl: provisioningUrl(raw?.bridgeProvisioningUrl),
+  } : readConfig(raw);
   const lockFile = stateFile + '.lock';
   const lock = await open(lockFile, 'wx', 0o600).catch(err => {
     if (err.code === 'EEXIST') throw new ProtocolError('此配置已有连接器在运行。停止它后才能重启。');
     throw err;
   });
-  const controller = new AbortController();
-  for (const name of ['SIGINT', 'SIGTERM']) process.once(name, () => controller.abort());
   try {
     await lock.writeFile(String(process.pid) + '\n');
-    await connect(config, stateFile, { signal: controller.signal });
+    options.signal.throwIfAborted();
+    await connect(config, stateFile, options);
   } finally {
     await lock.close();
     await unlink(lockFile);
   }
 }
 
-main().catch(err => {
-  console.error(err instanceof ProtocolError ? err.message : '启动失败。请检查配置和状态文件。');
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const controller = new AbortController();
+  for (const name of ['SIGINT', 'SIGTERM']) process.once(name, () => controller.abort());
+  const run = process.argv.length === 3 ? runConnector(resolve(process.argv[2]), { signal: controller.signal }) :
+    Promise.reject(new ProtocolError('用法：node scripts/dm-matrix/connector.mjs /路径/config.json'));
+  run.catch(err => {
+    if (controller.signal.aborted) return;
+    console.error(err instanceof ProtocolError ? err.message : '启动失败。请检查配置和状态文件。');
+    process.exitCode = 1;
+  });
+}
