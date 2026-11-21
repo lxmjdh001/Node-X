@@ -7,10 +7,12 @@ type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Account = { id: string; label: string; username: string; connected: boolean; lastSyncAt: string | null };
 type ConnectAccount = Pick<Account, "id" | "label" | "username"> & Partial<Pick<Account, "connected">>;
 type ConnectionStatus = {
-  status: "unconfigured" | "idle" | "starting" | "syncing" | "online" | "offline" | "failed";
+  status: "unconfigured" | "awaiting_authorization" | "idle" | "starting" | "syncing" | "online" | "offline" | "failed";
   message?: string;
   paired: boolean;
   selfConfigured?: boolean;
+  hosted?: boolean;
+  expectedUsername?: string;
 };
 type BridgeConfiguration = {
   matrixUrl: string;
@@ -46,6 +48,7 @@ const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-dig
 const sendStatus = { queued: "等待连接器发送", sent: "已发送", failed: "发送失败", uncertain: "结果待确认" };
 const connectionMessages: Record<ConnectionStatus["status"], string> = {
   unconfigured: "此账号还未配置私信桥接。",
+  awaiting_authorization: "请在 mautrix-manager 中完成此账号的 X 授权，Node X 会自动检查。",
   idle: "已找到此账号的私信桥接。连接后可在私信工作室查看消息。",
   starting: "正在启动私信连接。",
   syncing: "已连接桥接，正在等待首次同步。",
@@ -56,6 +59,10 @@ const connectionMessages: Record<ConnectionStatus["status"], string> = {
 
 function connecting(status?: ConnectionStatus["status"]) {
   return status === "starting" || status === "syncing";
+}
+
+function shouldCheckConnection(status: ConnectionStatus["status"]) {
+  return connecting(status) || status === "awaiting_authorization";
 }
 
 const usernamePattern = "@?[A-Za-z0-9_]{1,15}";
@@ -512,8 +519,10 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
   const startOnFirstCheck = useRef(autoStart && accounts.length === 1);
   const account = accounts.find(item => item.id === accountId);
   const status = connection?.status;
+  const awaitingAuthorization = status === "awaiting_authorization";
   const pending = connecting(status);
-  const canConfigure = Boolean(account && status && !connection?.paired && !pending && status !== "online");
+  const canConfigure = Boolean(account && status && !connection?.hosted && !connection?.paired &&
+    !pending && !awaitingAuthorization && status !== "online");
   const canEditConfiguration = canConfigure && connection?.selfConfigured;
   const showConfiguration = canConfigure && (status === "unconfigured" || (editingConfiguration && canEditConfiguration));
   const path = `/api/dm/accounts/${accountId}/connect`;
@@ -525,7 +534,7 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
       const next = await request<ConnectionStatus>(configuration ? `${path}-config` : path, "POST", configuration ?? {});
       setConnection(next);
       setEditingConfiguration(false);
-      if (connecting(next.status)) setCheckAttempt(attempt => attempt + 1);
+      if (shouldCheckConnection(next.status)) setCheckAttempt(attempt => attempt + 1);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -546,16 +555,16 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
         const next = await request<ConnectionStatus>(path);
         if (!active) return;
         setConnection(next);
-        if (startOnFirstCheck.current) {
+        if (startOnFirstCheck.current && next.status !== "awaiting_authorization") {
           startOnFirstCheck.current = false;
           if (next.status === "idle") {
             await startConnection();
             return;
           }
         }
-        if (!connecting(next.status)) return;
+        if (!shouldCheckConnection(next.status)) return;
         if (remainingChecks-- > 0) {
-          timeout = window.setTimeout(() => void checkStatus(), 3000);
+          timeout = window.setTimeout(() => void checkStatus(), next.status === "awaiting_authorization" ? 6000 : 3000);
         } else {
           setCheckPaused(true);
         }
@@ -575,7 +584,7 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
 
   function connect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!account || !status || busy || disconnecting || pending || checkPaused || status === "online") return;
+    if (!account || !status || busy || disconnecting || pending || awaitingAuthorization || checkPaused || status === "online") return;
     if (showConfiguration) {
       const fields = new FormData(event.currentTarget);
       void startConnection({
@@ -596,7 +605,7 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
     setError("");
     try {
       await request(`/api/dm/accounts/${accountId}/disconnect`, "POST", {});
-      if (connection?.selfConfigured) {
+      if (connection?.selfConfigured && !connection.hosted) {
         setConnection(undefined);
         setDisconnecting(false);
       } else {
@@ -609,10 +618,12 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
     }
   }
 
-  const statusMessage = account
-    ? connection?.message || (status ? connectionMessages[status] : "正在检查私信连接状态…")
-    : "请选择要连接的 X 账号。";
   const username = account?.username.trim() ?? "";
+  const expectedUsername = connection?.expectedUsername?.trim() || username;
+  const statusMessage = !account ? "请选择要连接的 X 账号。" : connection?.message ||
+    (awaitingAuthorization && validUsername.test(expectedUsername)
+      ? `请在 mautrix-manager 中完成 @${normalizedUsername(expectedUsername)} 的 X 授权，Node X 会自动检查。`
+      : status ? connectionMessages[status] : "正在检查私信连接状态…");
 
   return (
     <Dialog title={disconnecting ? "断开私信连接" : "连接 X 私信"}
@@ -658,6 +669,7 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
             ? <p className="form-error" role="alert">{error || statusMessage}</p>
             : !showConfiguration && <p className="subtle" role="status">{statusMessage}</p>}
           {checkPaused && pending && !error && <p className="subtle">后台仍在连接。可以关闭弹窗，稍后回来查看，或立即刷新状态。</p>}
+          {checkPaused && awaitingAuthorization && !error && <p className="subtle">已暂停自动检查。完成授权后可手动刷新状态。</p>}
         </div>
         {disconnecting && error && <p className="form-error dialog-body" role="alert">{error}</p>}
         <div className="dialog-footer">
@@ -674,8 +686,8 @@ export function DmConnect({ accounts, initialAccount, request, close, openInbox,
                 onClick={() => { setError(""); setDisconnecting(true); }}>断开连接</Button>}
               {canEditConfiguration && !showConfiguration && <Button type="button" variant="ghost" disabled={busy}
                 onClick={() => { setError(""); setEditingConfiguration(true); }}>更新配置</Button>}
-              {account && checkPaused ? (
-                <Button type="button" variant="primary" icon={RefreshCw} onClick={() => setCheckAttempt(attempt => attempt + 1)}>刷新状态</Button>
+              {account && (checkPaused || awaitingAuthorization) ? (
+                <Button type="button" variant="primary" icon={RefreshCw} disabled={busy} onClick={() => setCheckAttempt(attempt => attempt + 1)}>刷新状态</Button>
               ) : showConfiguration ? (
                 <Button type="submit" variant="primary" icon={Link2} busy={busy}>保存并连接</Button>
               ) : account && status === "online" && openInbox ? (

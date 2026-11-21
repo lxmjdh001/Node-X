@@ -68,8 +68,9 @@ const tickets = new Map<string, Ticket>();
 type Account = { id: string; label: string; username: string; xUserId: string | null; xUsername?: string | null };
 type Connection = { accountId: string; tokenHash: string; lastSeenAt: string; lastSyncAt: string | null };
 type ManagedConnection = {
-  status: 'starting' | 'syncing' | 'online' | 'offline' | 'failed';
+  status: 'starting' | 'awaiting_authorization' | 'syncing' | 'online' | 'offline' | 'failed';
   message?: string;
+  expectedUsername?: string;
   controller: AbortController;
   done?: Promise<void>;
 };
@@ -159,18 +160,23 @@ function managedConfig(accountId: string) {
   return join(workspaceDirectory(), 'dm-matrix', `${accountId}.json`);
 }
 
+function hostedConfig(accountId: string) {
+  return join(workspaceDirectory(), 'dm-matrix', `${accountId}.hosted.json`);
+}
+
 function connectionStatus(accountId: string) {
   const connection = row<Connection>('SELECT * FROM dm_connections WHERE accountId = ?', accountId);
   const paired = Boolean(connection);
   const config = managedConfig(accountId);
-  const fileConfigured = existsSync(config);
+  const hosted = existsSync(hostedConfig(accountId));
+  const fileConfigured = hosted || existsSync(config);
   const selfConfigured = !fileConfigured && Boolean(row('SELECT 1 FROM dm_bridge_configs WHERE accountId = ?', accountId));
-  const details = { paired, selfConfigured };
+  const details = { paired, selfConfigured, hosted };
   const managed = managedConnections.get(config);
   const online = connection && connection.lastSeenAt > before(onlineMs);
   if (managed && !managed.controller.signal.aborted) {
     if (managed.status === 'online' && !online) return { status: 'offline', ...details };
-    return { status: managed.status, message: managed.message, ...details };
+    return { status: managed.status, message: managed.message, expectedUsername: managed.expectedUsername, ...details };
   }
   if (online) return { status: 'online', ...details };
   if (paired) return { status: 'offline', ...details };
@@ -180,7 +186,9 @@ function connectionStatus(accountId: string) {
 function startManaged(accountId: string, authorize?: () => boolean) {
   const config = managedConfig(accountId);
   if (managedClosing || managedConnections.get(config)?.done) return;
-  const fileConfigured = existsSync(config);
+  const hostedPath = hostedConfig(accountId);
+  const hosted = existsSync(hostedPath);
+  const fileConfigured = hosted || existsSync(config);
   const saved = fileConfigured ? undefined : row<{ sealedConfig: string }>(
     'SELECT sealedConfig FROM dm_bridge_configs WHERE accountId = ?', accountId);
   if (!fileConfigured && !saved) return;
@@ -196,19 +204,39 @@ function startManaged(accountId: string, authorize?: () => boolean) {
       write('UPDATE dm_connections SET lastSeenAt = ? WHERE tokenHash = ?', before(onlineMs), hash);
     });
   };
-  task.done = runConnector(config, {
+  const checkAccess = () => {
+    if (!authorize?.() || !workspaceAuthorized(workspace)) {
+      throw new InputError('请回到窗口管理重新连接此账号。', 401);
+    }
+  };
+  task.done = runConnector(hosted ? hostedPath : config, {
     signal: task.controller.signal,
     log: () => {},
     warn: () => {},
     managed: {
       nodeXUrl: process.env.NODEX_PUBLIC_ORIGIN?.trim() || `http://127.0.0.1:${process.env.PORT || 4173}`,
       ...(saved && { readConfig: () => JSON.parse(reveal(saved.sealedConfig)), transport: publicDmFetch }),
+      ...(hosted && { hosted: {
+        checkAccess,
+        verifyIdentity: (xUserId: string) => {
+          checkAccess();
+          const current = account(accountId);
+          const previous = row<{ xUserId: string }>('SELECT xUserId FROM dm_bridge_configs WHERE accountId = ?', accountId);
+          if ([current.xUserId, previous?.xUserId].some(expected => expected && expected !== xUserId)) {
+            throw new InputError('私信桥接的 X 账号与所选账号不一致。', 409);
+          }
+        },
+        onAwaiting: (username: string) => {
+          task.status = 'awaiting_authorization';
+          task.expectedUsername = username;
+        },
+      } }),
       hasToken: (token, xUserId) => workspaceAuthorized(workspace) && Boolean(runInWorkspace(workspace, () => row(`
         SELECT 1 FROM dm_connections d JOIN accounts a ON a.id = d.accountId
         WHERE d.accountId = ? AND d.tokenHash = ? AND COALESCE(a.xUserId, d.xUserId) = ?
       `, accountId, tokenHash(token), xUserId))),
       pair: xUserId => {
-        if (!authorize?.() || !workspaceAuthorized(workspace)) throw new InputError('请回到窗口管理重新连接此账号。', 401);
+        checkAccess();
         clearTickets(accountId, workspace);
         return bindAccount(accountId, workspace, xUserId, true);
       },
@@ -244,7 +272,9 @@ export function restoreManagedDm() {
     runInWorkspace(workspace, () => {
       if (!existsSync(join(workspaceDirectory(), 'dm-matrix')) || !workspaceAuthorized(workspace)) return;
       for (const { accountId } of rows<{ accountId: string }>('SELECT accountId FROM dm_connections')) {
-        if (existsSync(`${managedConfig(accountId)}.state.json`)) startManaged(accountId);
+        if ([hostedConfig(accountId), managedConfig(accountId)].some(path => existsSync(`${path}.state.json`))) {
+          startManaged(accountId);
+        }
       }
     });
   }
@@ -408,7 +438,7 @@ dm.get('/dm/accounts/:id/connect', (req, res) => {
 
 function requireEditableBridge(accountId: string) {
   const config = managedConfig(accountId);
-  if (existsSync(config)) throw new InputError('该账号正在使用管理员配置的私信桥接。', 409);
+  if (existsSync(hostedConfig(accountId)) || existsSync(config)) throw new InputError('该账号正在使用托管私信桥接。', 409);
   if (managedConnections.get(config)?.done || row('SELECT 1 FROM dm_connections WHERE accountId = ?', accountId)) {
     throw new InputError('请先断开私信连接，再更新桥接配置。', 409);
   }

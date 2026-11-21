@@ -9,6 +9,7 @@ type Transport = (url: string, init: RequestInit) => Promise<Response>;
 export function discoverBridgeAccount(config: BridgeCredential, username: string, options: {
   signal: AbortSignal;
   transport?: Transport;
+  expectedBot?: string;
 }): Promise<{ xUserId: string; bridgeBotId: string }>;
 
 export function runConnector(configFile: string, options: {
@@ -19,6 +20,11 @@ export function runConnector(configFile: string, options: {
     nodeXUrl: string;
     readConfig?: () => unknown;
     transport?: Transport;
+    hosted?: {
+      checkAccess: () => void;
+      verifyIdentity: (xUserId: string) => void;
+      onAwaiting: (username: string) => void;
+    };
     pair: (xUserId: string) => { token: string; account: { xUserId: string | null } };
     hasToken: (token: string, xUserId: string) => boolean;
     onPaired: (token: string) => void;

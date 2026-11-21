@@ -18,6 +18,8 @@ export class ProtocolError extends Error {
   }
 }
 
+class BridgeAuthorizationPending extends ProtocolError {}
+
 async function readPrivateJson(path) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -167,21 +169,23 @@ function normalizedUsername(value) {
   return typeof value === 'string' ? value.replace(/^@/, '').toLowerCase() : '';
 }
 
-export async function discoverBridgeAccount(config, username, { signal, transport }) {
+export async function discoverBridgeAccount(config, username, { signal, transport, expectedBot }) {
   const userId = await matrixIdentity(config, signal, transport);
   const bridge = await bridgeIdentity(config, userId, signal, transport);
   if (bridge?.network?.network_id !== 'twitter' || !matrixId(bridge.bridge_bot, '@')) {
     throw new ProtocolError('该地址未返回有效的 mautrix Twitter 桥接信息。');
   }
+  if (expectedBot && bridge.bridge_bot !== expectedBot) throw new ProtocolError('私信桥接机器人与账号配置不符。');
   if (bridge.bridge_bot === userId) throw new ProtocolError('请使用自己的 Matrix 用户凭据。');
   const matches = events(bridge.logins).filter(login =>
     normalizedUsername(login.profile?.username || login.name) === normalizedUsername(username));
-  if (matches.length !== 1 || typeof matches[0].id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(matches[0].id)) {
-    throw new ProtocolError('桥接中未找到匹配的 X 用户名。请确认对应账号已在 mautrix 完成登录。');
-  }
+  if (!matches.length) throw new BridgeAuthorizationPending('桥接中未找到匹配的 X 用户名。请确认对应账号已在 mautrix 完成登录。');
   const login = matches[0];
+  if (matches.length !== 1 || typeof login.id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(login.id)) {
+    throw new ProtocolError('桥接未返回唯一、有效的 X 用户编号。');
+  }
   if (login.state?.state_event !== 'CONNECTED') {
-    throw new ProtocolError('这个 X 账号在 mautrix 中还未就绪，请完成登录和 X Chat 验证后再试。');
+    throw new BridgeAuthorizationPending('这个 X 账号在 mautrix 中还未就绪，请完成登录和 X Chat 验证后再试。');
   }
   return { xUserId: login.id, bridgeBotId: bridge.bridge_bot };
 }
@@ -484,14 +488,37 @@ async function connect(config, stateFile, { signal, managed, log = console.log, 
   }
 }
 
+async function prepareHostedConfig(raw, configFile, { managed, signal }) {
+  if (!managed?.hosted || raw?.xUserId) return raw;
+  const username = normalizedUsername(raw?.expectedUsername);
+  if (!/^[a-z0-9_]{1,15}$/.test(username)) throw new ProtocolError('托管账号的 X 用户名配置无效。');
+  // Validate every service address and the pinned bot before attempting an authorization.
+  const base = readConfig({ ...raw, nodeXUrl: managed.nodeXUrl, xUserId: '1' });
+  const bridge = { ...base, bridgeProvisioningUrl: provisioningUrl(raw.bridgeProvisioningUrl) };
+  const deadline = Date.now() + 10 * 60_000;
+  for (;;) {
+    signal.throwIfAborted();
+    managed.hosted.checkAccess();
+    try {
+      const verified = await discoverBridgeAccount(bridge, username, { signal, expectedBot: base.bridgeBotId });
+      signal.throwIfAborted();
+      managed.hosted.verifyIdentity(verified.xUserId);
+      const pinned = { ...raw, xUserId: verified.xUserId };
+      await saveState(configFile, pinned);
+      return pinned;
+    } catch (error) {
+      if (!(error instanceof BridgeAuthorizationPending)) throw error;
+      if (Date.now() >= deadline) throw new ProtocolError('等待 X 授权超时。完成授权后，可在窗口管理重新连接。');
+      managed.hosted.onAwaiting(username);
+      await delay(6000, null, { signal });
+    }
+  }
+}
+
 export async function runConnector(configFile, options) {
   const stateFile = configFile + '.state.json';
   const managed = options.managed;
   const raw = managed?.readConfig ? managed.readConfig() : await readPrivateJson(configFile);
-  const config = managed ? {
-    ...readConfig({ ...raw, nodeXUrl: managed.nodeXUrl, pairTicket: null }),
-    bridgeProvisioningUrl: provisioningUrl(raw?.bridgeProvisioningUrl),
-  } : readConfig(raw);
   const lockFile = stateFile + '.lock';
   const lock = await open(lockFile, 'wx', 0o600).catch(err => {
     if (err.code === 'EEXIST') throw new ProtocolError('此配置已有连接器在运行。停止它后才能重启。');
@@ -500,6 +527,11 @@ export async function runConnector(configFile, options) {
   try {
     await lock.writeFile(String(process.pid) + '\n');
     options.signal.throwIfAborted();
+    const prepared = managed?.hosted ? await prepareHostedConfig(raw, configFile, options) : raw;
+    const config = managed ? {
+      ...readConfig({ ...prepared, nodeXUrl: managed.nodeXUrl, pairTicket: null }),
+      bridgeProvisioningUrl: provisioningUrl(prepared?.bridgeProvisioningUrl),
+    } : readConfig(prepared);
     await connect(config, stateFile, options);
   } finally {
     await lock.close();

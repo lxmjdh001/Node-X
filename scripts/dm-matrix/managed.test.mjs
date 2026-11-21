@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,10 +13,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const localhost = '127.0.0.1';
 const matrixUserId = '@operator:fixture.test';
+const hostedMatrixUserId = '@hosted:fixture.test';
 const bridgeBotId = '@twitterbot:fixture.test';
 const xUserId = '1234';
 const otherXUserId = '9876';
 const selfConfiguredXUserId = '4567';
+const hostedXUserId = '7654';
+const hostedUsername = 'hosted_user';
 const publicMatrixOrigin = 'https://matrix.fixture.test';
 const entry = fileURLToPath(new URL('../../server/index.ts', import.meta.url));
 
@@ -33,8 +36,8 @@ async function close(server) {
   await closed;
 }
 
-async function waitFor(check, diagnostic) {
-  const deadline = Date.now() + 8_000;
+async function waitFor(check, diagnostic, timeout = 8_000) {
+  const deadline = Date.now() + timeout;
   while (!(await check())) {
     if (Date.now() >= deadline) throw new Error(diagnostic());
     await delay(25);
@@ -99,31 +102,39 @@ test('the workbench configures, connects, restores, and disconnects managed maut
   await Promise.all([mkdir(join(directory, 'dist')), mkdir(configs, { recursive: true, mode: 0o700 })]);
   await writeFile(join(directory, 'dist', 'index.html'), '<!doctype html><title>Node X fixture</title>');
   const matrixAccessToken = randomBytes(24).toString('base64url');
+  const hostedMatrixToken = randomBytes(24).toString('base64url');
   const { promise: firstSync, resolve: releaseFirstSync } = Promise.withResolvers();
   const syncRequests = [];
   let bridgeChecks = 0;
   let selfLoginId = selfConfiguredXUserId;
+  let hostedAuthorized = false;
   const violations = [];
   const matrix = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://matrix.fixture');
     res.setHeader('content-type', 'application/json');
     const reply = data => res.end(JSON.stringify(data));
-    if (req.headers.authorization !== 'Bearer ' + matrixAccessToken) {
+    const hosted = req.headers.authorization === 'Bearer ' + hostedMatrixToken;
+    if (!hosted && req.headers.authorization !== 'Bearer ' + matrixAccessToken) {
       violations.push('Matrix credential missing or incorrect');
       res.statusCode = 401;
       return reply({});
     }
-    if (url.pathname === '/_matrix/client/v3/account/whoami') return reply({ user_id: matrixUserId });
+    const user = hosted ? hostedMatrixUserId : matrixUserId;
+    if (url.pathname === '/_matrix/client/v3/account/whoami') return reply({ user_id: user });
     if (url.pathname === '/_matrix/provision/v3/whoami') {
       bridgeChecks++;
-      if (url.searchParams.get('user_id') !== matrixUserId) violations.push('incorrect Matrix user for mautrix');
+      if (url.searchParams.get('user_id') !== user) violations.push('incorrect Matrix user for mautrix');
+      const logins = hosted ? [] : [
+        { id: xUserId, profile: { username: 'matched' }, state: { state_event: 'CONNECTED' } },
+        { id: selfLoginId, profile: { username: 'selfmanaged' }, state: { state_event: 'CONNECTED' } },
+      ];
+      if (hosted && hostedAuthorized) {
+        logins.push({ id: hostedXUserId, profile: { username: hostedUsername }, state: { state_event: 'CONNECTED' } });
+      }
       return reply({
         bridge_bot: bridgeBotId,
         network: { network_id: 'twitter' },
-        logins: [
-          { id: xUserId, profile: { username: 'matched' }, state: { state_event: 'CONNECTED' } },
-          { id: selfLoginId, profile: { username: 'selfmanaged' }, state: { state_event: 'CONNECTED' } },
-        ],
+        logins,
       });
     }
     if (url.pathname === '/_matrix/client/v3/sync') {
@@ -139,6 +150,9 @@ test('the workbench configures, connects, restores, and disconnects managed maut
           }),
           ...(selfInitialSync && {
             '!selfmanaged:fixture.test': bridgedRoom(selfConfiguredXUserId, 'Self-managed private message'),
+          }),
+          ...(hosted && !url.searchParams.has('since') && {
+            '!hosted:fixture.test': bridgedRoom(hostedXUserId, 'Hosted private message'),
           }),
         } },
       });
@@ -216,6 +230,7 @@ test('the workbench configures, connects, restores, and disconnects managed maut
     const result = await response.text();
     assert.doesNotMatch(result, /"(?:ticket|pairTicket|token|tokenHash|matrixAccessToken|matrixUrl|bridgeProvisioningUrl|sealedConfig)"\s*:/i);
     assert.ok(!result.includes(matrixAccessToken), 'Matrix credential was returned to the workbench');
+    assert.ok(!result.includes(hostedMatrixToken), 'Hosted Matrix credential was returned to the workbench');
     if (expectedStatus === undefined) assert.ok(response.ok, path + ': ' + response.status + ' ' + result);
     else assert.equal(response.status, expectedStatus, path + ': ' + result);
     return JSON.parse(result);
@@ -224,10 +239,12 @@ test('the workbench configures, connects, restores, and disconnects managed maut
   await api('/accounts', { label: 'Matched', username: 'matched' });
   await api('/accounts', { label: 'Unmatched', username: 'unmatched' });
   await api('/accounts', { label: 'Self-managed', username: 'selfmanaged' });
+  await api('/accounts', { label: 'Hosted', username: hostedUsername });
   const { accounts } = await inbox();
   const matched = accounts.find(account => account.username === 'matched').id;
   const unmatched = accounts.find(account => account.username === 'unmatched').id;
   const selfManaged = accounts.find(account => account.username === 'selfmanaged').id;
+  const hosted = accounts.find(account => account.username === hostedUsername).id;
   const connectPath = id => '/dm/accounts/' + id + '/connect';
   const disconnectPath = id => '/dm/accounts/' + id + '/disconnect';
   const connect = (id, body) => api(connectPath(id), body);
@@ -237,13 +254,14 @@ test('the workbench configures, connects, restores, and disconnects managed maut
       bridgeProvisioningUrl: matrixUrl + '/_matrix/provision',
     }), { mode: 0o600 });
   }
-  async function waitForStatus(id, expected, paired) {
+  async function waitForStatus(id, expected, paired, timeout) {
     let latest;
     await waitFor(async () => {
       latest = await connect(id);
       return latest.status === expected;
-    }, () => 'Expected ' + expected + ', received ' + JSON.stringify(latest) + '\n' + logs);
+    }, () => 'Expected ' + expected + ', received ' + JSON.stringify(latest) + '\n' + logs, timeout);
     assert.equal(latest.paired, paired);
+    return latest;
   }
 
   await waitForStatus(matched, 'unconfigured', false);
@@ -327,7 +345,27 @@ test('the workbench configures, connects, restores, and disconnects managed maut
   await api(configPath, publicConfig, 409);
   assert.deepEqual(savedConfig(), stored);
 
+  const hostedPath = join(configs, hosted + '.hosted.json');
+  await writeFile(hostedPath, JSON.stringify({
+    matrixUrl, bridgeProvisioningUrl: matrixUrl + '/_matrix/provision', matrixAccessToken: hostedMatrixToken,
+    bridgeBotId, expectedUsername: hostedUsername,
+  }), { mode: 0o600 });
+  const hostedStart = await connect(hosted, {});
+  assert.equal(hostedStart.hosted, true);
+  assert.equal(hostedStart.paired, false);
+  const waiting = await waitForStatus(hosted, 'awaiting_authorization', false);
+  assert.equal(waiting.hosted, true);
+  assert.equal(waiting.expectedUsername, hostedUsername);
+  assert.equal(JSON.parse(await readFile(hostedPath, 'utf8')).xUserId, undefined);
+
+  hostedAuthorized = true;
+  await waitForStatus(hosted, 'online', true, 12_000);
+  assert.equal(JSON.parse(await readFile(hostedPath, 'utf8')).xUserId, hostedXUserId);
+  const hostedInbox = await api('/dm/inbox?accountId=' + hosted);
+  assert.deepEqual(hostedInbox.conversations.map(({ preview }) => preview), ['Hosted private message']);
+
   assert.ok(bridgeChecks >= 3);
   assert.deepEqual(violations, []);
   assert.ok(!logs.includes(matrixAccessToken), 'Matrix credential was written to server logs');
+  assert.ok(!logs.includes(hostedMatrixToken), 'Hosted Matrix credential was written to server logs');
 });
