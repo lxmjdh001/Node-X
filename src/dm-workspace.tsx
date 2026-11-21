@@ -154,7 +154,7 @@ export function DmWorkspace({ request, onManageAccounts }: { request: Request; o
   }
 
   return (
-    <section aria-label="X 私信工作台">
+    <section className="dm-page-content" aria-label="X 私信工作台">
       {(error || notice) && <div className={`dm-feedback${error ? " is-error" : ""}`} role={error ? "alert" : "status"}>{error || notice}</div>}
       <div className={`dm-workspace${mobileThread && active ? " dm-show-thread" : ""}`}>
         <aside className="dm-accounts" aria-label="X 账号列表">

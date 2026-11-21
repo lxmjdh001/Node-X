@@ -1,7 +1,24 @@
+.workspace.dm-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 32rem;
+}
+.dm-frame .topbar, .dm-frame .workspace-footer { flex: none; }
+.dm-frame main, .dm-page-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+}
+.dm-frame main { padding-block: 14px 8px; }
+.dm-frame .workspace-footer { margin-top: 0; padding-block: 8px 0; }
 .dm-workspace {
   display: grid;
+  flex: 1;
   grid-template-columns: minmax(140px, .85fr) minmax(230px, 1.3fr) minmax(0, 2.65fr);
-  height: clamp(480px, calc(100dvh - 235px), 900px);
+  min-height: 0;
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -307,8 +324,8 @@
   }
 }
 @media (max-width: 655px) {
-  .dm-workspace { grid-template-columns: minmax(0, 1fr); height: max(390px, calc(100dvh - 205px)); }
-  .dm-feedback + .dm-workspace { height: max(390px, calc(100dvh - 245px)); }
+  .dm-frame main { padding-block: 8px; }
+  .dm-workspace { grid-template-columns: minmax(0, 1fr); }
   .dm-conversations { border-right: 0; }
   .dm-workspace .dm-thread { display: none; }
   .dm-show-thread .dm-conversations { display: none; }

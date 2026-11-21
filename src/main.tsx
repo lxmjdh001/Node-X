@@ -685,7 +685,7 @@ function App({
     proxies: ["代理网络", "配置 SOCKS5 出口，并检查连接状态。"],
     profiles: ["窗口管理", "在同一个窗口管理 X 账号、SOCKS5 代理和显示设置。"],
     drafts: ["内容工作室", "导入 X 或 Facebook 帖子，生成文案，再分配到账号。"],
-    messages: ["私信工作室", "在一个收件箱查看、回复和批量处理各 X 账号的私信。"],
+    messages: ["私信工作室", ""],
     models: ["模型列表", "添加服务商的 API Key，并分别选择写作和发布审核模型。"],
     settings: ["系统设置", "查看服务与 X 接入状态。"],
   }[page];
@@ -1018,7 +1018,7 @@ function App({
           </div>
         </div>
       </aside>
-      <div className="workspace">
+      <div className={page === "messages" ? "workspace dm-frame" : "workspace"}>
         <header className="topbar">
           <div className="breadcrumb">
             <IconButton
@@ -1068,45 +1068,47 @@ function App({
           </div>
         </header>
         <main>
-          <div className="page-heading">
-            <div>
-              <h1>{pageInfo[0]}</h1>
-              <p>{pageInfo[1]}</p>
-            </div>
-            <div className="heading-action">
-              {page === "profiles" && showCamoufox && (
-                <Button
-                  icon={Fingerprint}
-                  onClick={() => {
-                    setCamoufoxOpen(true);
-                    void refreshCamoufox();
-                  }}
-                >
-                  Camoufox 批量管理
-                </Button>
-              )}
-              {page === "profiles" && (
-                <Button icon={Upload} onClick={() => setImporting(true)}>
-                  批量导入
-                </Button>
-              )}
-              {page === "overview" || page === "profiles"
-                ? newWindowButton
-                : page === "proxies"
-                  ? addButton("proxy", "添加代理")
-                  : null}
-              {page === "drafts" && (
-                <>
-                  <Button icon={Pencil} variant="secondary" disabled={!data.accounts.length} onClick={() => setModal({ type: "draft" })}>
-                    手写草稿
+          {page !== "messages" && (
+            <div className="page-heading">
+              <div>
+                <h1>{pageInfo[0]}</h1>
+                <p>{pageInfo[1]}</p>
+              </div>
+              <div className="heading-action">
+                {page === "profiles" && showCamoufox && (
+                  <Button
+                    icon={Fingerprint}
+                    onClick={() => {
+                      setCamoufoxOpen(true);
+                      void refreshCamoufox();
+                    }}
+                  >
+                    Camoufox 批量管理
                   </Button>
-                  <Button icon={Plus} variant="primary" onClick={() => setPostImportOpen(true)}>
-                    从帖子生成
+                )}
+                {page === "profiles" && (
+                  <Button icon={Upload} onClick={() => setImporting(true)}>
+                    批量导入
                   </Button>
-                </>
-              )}
+                )}
+                {page === "overview" || page === "profiles"
+                  ? newWindowButton
+                  : page === "proxies"
+                    ? addButton("proxy", "添加代理")
+                    : null}
+                {page === "drafts" && (
+                  <>
+                    <Button icon={Pencil} variant="secondary" disabled={!data.accounts.length} onClick={() => setModal({ type: "draft" })}>
+                      手写草稿
+                    </Button>
+                    <Button icon={Plus} variant="primary" onClick={() => setPostImportOpen(true)}>
+                      从帖子生成
+                    </Button>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
+          )}
           {fetchError && (
             <div className="alert error-alert" role="alert">
               <Icon icon={Activity} />
