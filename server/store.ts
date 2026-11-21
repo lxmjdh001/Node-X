@@ -168,8 +168,45 @@ function openDatabase(directory: string): DatabaseSync {
     purpose TEXT PRIMARY KEY CHECK (purpose IN ('writing', 'publishing')),
     modelId TEXT NOT NULL
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS dm_connections (
+    accountId TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    tokenHash TEXT NOT NULL UNIQUE,
+    xUserId TEXT,
+    lastSeenAt TEXT NOT NULL,
+    lastSyncAt TEXT
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS dm_conversations (
+    id TEXT PRIMARY KEY,
+    accountId TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    remoteId TEXT NOT NULL,
+    title TEXT NOT NULL,
+    preview TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+    unread INTEGER NOT NULL DEFAULT 0 CHECK (unread IN (0, 1)),
+    labels TEXT NOT NULL DEFAULT '[]',
+    UNIQUE (accountId, remoteId)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS dm_recent_conversations ON dm_conversations (updatedAt DESC, id DESC);
+  CREATE TABLE IF NOT EXISTS dm_messages (
+    id TEXT PRIMARY KEY,
+    conversationId TEXT NOT NULL REFERENCES dm_conversations(id) ON DELETE CASCADE,
+    remoteId TEXT,
+    requestId TEXT UNIQUE,
+    text TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    status TEXT CHECK (status IN ('queued', 'sending', 'sent', 'failed', 'uncertain')),
+    claimedAt TEXT,
+    claimedBy TEXT,
+    UNIQUE (conversationId, remoteId)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS dm_recent_messages ON dm_messages (conversationId, createdAt DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS dm_reply_queue ON dm_messages (status, createdAt) WHERE requestId IS NOT NULL;
 `);
   const migrations = [
+    { table: 'dm_connections', column: 'xUserId', definition: 'TEXT' },
     { table: 'profiles', column: 'deviceScaleFactor', definition: 'REAL NOT NULL DEFAULT 1' },
     { table: 'profiles', column: 'colorScheme', definition: "TEXT NOT NULL DEFAULT 'light'" },
     { table: 'profiles', column: 'reducedMotion', definition: "TEXT NOT NULL DEFAULT 'no-preference'" },

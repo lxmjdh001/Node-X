@@ -10,6 +10,7 @@ import { macChromeLauncher, reapBrowsers, shutdownBrowsers } from './browser.js'
 import { camoufox } from './camoufox-routes.js';
 import { ContentError } from './content.js';
 import { editor } from './editor.js';
+import { dm, dmConnector } from './dm.js';
 import { InputError } from './errors.js';
 import { imports } from './imports.js';
 import { modelRoutes } from './model-routes.js';
@@ -112,10 +113,11 @@ if (clientLauncher) {
 }
 app.use('/api/auth', express.json({ limit: '8kb' }));
 app.use('/api', auth);
+app.use('/api/dm/connector', express.json({ limit: '1mb' }), dmConnector);
 app.use('/api', requireAuth);
 app.use('/api/import', express.json({ limit: '1200kb' }), imports);
 app.use('/api/camoufox', express.json({ limit: '32kb' }), camoufox);
-app.use('/api', express.json({ limit: '32kb' }), workspace, editor, postQueue, modelRoutes('workspace'), (_req, res) => {
+app.use('/api', express.json({ limit: '32kb' }), workspace, editor, postQueue, dm, modelRoutes('workspace'), (_req, res) => {
   res.status(404).json({ error: '找不到这个接口。' });
 });
 

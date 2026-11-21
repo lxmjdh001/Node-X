@@ -27,6 +27,7 @@ import {
   LoaderCircle,
   LogOut,
   Menu,
+  MessageSquare,
   Monitor,
   Network,
   Pencil,
@@ -57,6 +58,7 @@ import {
 import { parseProxyAddress } from "./proxy-address";
 import { launchOnMac } from "./local-launcher";
 import { assignmentModes, MAX_BULK_DELETE_IDS, MAX_FORMAT_REQUIREMENTS, MAX_POST_LINK, MAX_SOURCE_TEXT, MAX_VARIANTS, postLayouts, postOutputLanguages, type AssignmentMode, type PendingPost, type PostLayout, type PostOutputLanguage } from "./post-queue";
+import { DmWorkspace } from "./dm-workspace";
 import { ModelPage } from "./models-page";
 import { distributionPublishingModes, MAX_BULK_PUBLISH, publishSnapshot, type AssignmentResult, type DistributionPublishingMode, type PublishingMethod } from "./publishing";
 import { Icon, Button, IconButton, Dialog, Field } from "./ui";
@@ -176,7 +178,7 @@ type CamoufoxResult = {
   status: "ok" | "skipped" | "error";
   message: string;
 };
-type Page = "overview" | "proxies" | "profiles" | "drafts" | "models" | "settings";
+type Page = "overview" | "proxies" | "profiles" | "drafts" | "messages" | "models" | "settings";
 type EntityModal =
   | { type: "account"; item: Account }
   | { type: "proxy"; item?: Proxy }
@@ -202,6 +204,7 @@ const nav: { id: Page; title: string; icon: typeof Users }[] = [
   { id: "profiles", title: "窗口管理", icon: Monitor },
   { id: "proxies", title: "代理网络", icon: Network },
   { id: "drafts", title: "内容工作室", icon: FileText },
+  { id: "messages", title: "私信工作室", icon: MessageSquare },
   { id: "models", title: "模型列表", icon: Sparkles },
 ];
 const statusText: Record<Draft["status"], string> = {
@@ -557,7 +560,7 @@ function App({
       title: `删除${label}？`,
       description:
         type === "accounts"
-          ? "请先删除该账号关联的浏览器环境与内容，再删除账号记录。删除后无法恢复。"
+          ? "请先删除该账号关联的浏览器环境与内容。删除账号也会清除该账号已同步的私信记录，且无法恢复。"
           : type === "profiles"
             ? "删除后会清除这个窗口的浏览器会话和指纹设置。关联的账号和草稿仍可在窗口管理中查看。"
             : "删除后无法恢复。正在使用的配置可能需要先解除关联。",
@@ -682,6 +685,7 @@ function App({
     proxies: ["代理网络", "配置 SOCKS5 出口，并检查连接状态。"],
     profiles: ["窗口管理", "在同一个窗口管理 X 账号、SOCKS5 代理和显示设置。"],
     drafts: ["内容工作室", "导入 X 或 Facebook 帖子，生成文案，再分配到账号。"],
+    messages: ["私信工作室", "在一个收件箱查看、回复和批量处理各 X 账号的私信。"],
     models: ["模型列表", "添加服务商的 API Key，并分别选择写作和发布审核模型。"],
     settings: ["系统设置", "查看服务与 X 接入状态。"],
   }[page];
@@ -1892,6 +1896,7 @@ function App({
                   </p>
                 </>
               )}
+              {page === "messages" && <DmWorkspace request={request} onManageAccounts={() => go("profiles")} />}
               {page === "models" && <ModelPage requestModel={(path, method, body) => request("/api" + path, method, body)} onChange={() => refresh()} />}
               {page === "settings" && (
                 <div className="settings-grid">
