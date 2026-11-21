@@ -276,11 +276,14 @@ function Empty({
     </div>
   );
 }
-function workbenchPage(): Page {
-  const requested = location.hash.slice(1);
-  if (requested === "accounts") return "profiles";
-  if (requested === "settings") return "settings";
-  return nav.find((item) => item.id === requested)?.id ?? "overview";
+function workbenchRoute(): { page: Page; dmAccount?: string } {
+  const [requested, query] = location.hash.slice(1).split("?");
+  if (requested === "accounts") return { page: "profiles" };
+  if (requested === "settings") return { page: "settings" };
+  const page = nav.find((item) => item.id === requested)?.id ?? "overview";
+  const account = page === "messages" ? new URLSearchParams(query).get("account") : null;
+  const dmAccount = account && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(account) ? account : undefined;
+  return { page, dmAccount };
 }
 
 function App({
@@ -290,7 +293,7 @@ function App({
   onLogout: () => Promise<void>;
   accessExpiresAt: string | null;
 }) {
-  const [page, setPage] = useState<Page>(workbenchPage);
+  const [{ page, dmAccount }, setRoute] = useState(workbenchRoute);
   const [data, setData] = useState<Workspace>(blank);
   const clientLauncher = data.launcherExtensionId;
   const mcpUnavailable = !data.chromium?.installed || data.macChromeLauncher || clientLauncher
@@ -404,7 +407,7 @@ function App({
   }, []);
   useEffect(() => {
     const handle = () => {
-      setPage(workbenchPage());
+      setRoute(workbenchRoute());
       setQuery("");
     };
     window.addEventListener("hashchange", handle);
@@ -429,9 +432,10 @@ function App({
     if (params.has("x"))
       history.replaceState(null, "", `${location.pathname}${location.hash}`);
   }, []);
-  const go = (next: Page) => {
-    setPage(next);
-    location.hash = next;
+  const go = (next: Page, accountId?: string) => {
+    const dmAccount = next === "messages" ? accountId : undefined;
+    setRoute({ page: next, dmAccount });
+    location.hash = dmAccount ? `${next}?account=${encodeURIComponent(dmAccount)}` : next;
     setQuery("");
     setMobileNav(false);
   };
@@ -496,21 +500,6 @@ function App({
     } catch {
       // mutate has already shown the error.
       return false;
-    }
-  };
-  const openMessages = async (profile: Profile) => {
-    if (!clientLauncher) return;
-    setBusy(profile.id);
-    try {
-      const message = await launchOnMac(clientLauncher,
-        () => request(`/api/profiles/${profile.id}/launcher-ticket`, "POST", { messages: true }),
-        "open-messages");
-      setToast({ text: message });
-      void refresh();
-    } catch (error) {
-      setToast({ text: (error as Error).message, error: true });
-    } finally {
-      setBusy("");
     }
   };
   const openAssignedPages = async (drafts: ComposerDraft[]) => {
@@ -841,11 +830,9 @@ function App({
                       )}
                       {!preview && (
                         <>
-                          {profile && clientLauncher && (
-                            <Button icon={ExternalLink} disabled={!!busy} onClick={() => void openMessages(profile)}>
-                              打开 X 私信
-                            </Button>
-                          )}
+                          <Button icon={MessageSquare} onClick={() => go("messages", account.id)}>
+                            管理私信
+                          </Button>
                           {profile?.running && data.remoteBrowser && (
                             <IconButton
                               icon={Square}
@@ -1898,7 +1885,8 @@ function App({
                   </p>
                 </>
               )}
-              {page === "messages" && <DmWorkspace request={request} onManageAccounts={() => go("profiles")} />}
+              {page === "messages" && <DmWorkspace key={dmAccount ?? "all"} initialAccountId={dmAccount}
+                request={request} onManageAccounts={() => go("profiles")} />}
               {page === "models" && <ModelPage requestModel={(path, method, body) => request("/api" + path, method, body)} onChange={() => refresh()} />}
               {page === "settings" && (
                 <div className="settings-grid">

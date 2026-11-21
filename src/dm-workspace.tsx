@@ -41,13 +41,17 @@ function Avatar({ name, large = false }: { name: string; large?: boolean }) {
   return <span className={`dm-avatar${large ? " dm-avatar-large" : ""}`} aria-hidden="true">{Array.from(name.trim())[0]?.toUpperCase() || "X"}</span>;
 }
 
-export function DmWorkspace({ request, onManageAccounts }: { request: Request; onManageAccounts: () => void }) {
+export function DmWorkspace({ request, initialAccountId = "", onManageAccounts }: {
+  request: Request;
+  initialAccountId?: string;
+  onManageAccounts: () => void;
+}) {
   const [data, setData] = useState<InboxData>(emptyInbox);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [accountId, setAccountId] = useState("");
+  const [accountId, setAccountId] = useState(initialAccountId);
   const [cursors, setCursors] = useState<string[]>([]);
   const [activeId, setActiveId] = useState("");
   const [mobileThread, setMobileThread] = useState(false);
